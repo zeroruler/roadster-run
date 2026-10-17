@@ -151,7 +151,9 @@ const SMALL = Math.min(innerWidth, innerHeight) < 700;
 // ---------- renderer / scene ----------
 const stage = document.getElementById('stage');
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, SMALL ? 1.75 : 2));
+const DPR_CAP = Math.min(window.devicePixelRatio || 1, SMALL ? 1.5 : 2);
+let dpr = DPR_CAP;
+renderer.setPixelRatio(dpr);
 renderer.setSize(innerWidth, innerHeight);
 renderer.setClearColor(0xffffff, 1);
 renderer.shadowMap.enabled = true;
@@ -408,13 +410,20 @@ function glbMaterial(proto, paint) {
   }
   return tintCache.get(key);
 }
+const blobGeo = shared(new THREE.PlaneGeometry(2.7, 5.6));
+const blobMat = shared(new THREE.MeshBasicMaterial({ map: softTex, color: 0x000000, transparent: true, opacity: 0.3, depthWrite: false }));
 function buildGlbCar(paint, opts) {
   const proto = opts.suv && suvProto ? suvProto : carProto;
   const root = new THREE.Group(), tilt = new THREE.Group(), model = new THREE.Group();
   root.add(tilt); tilt.position.y = 0.7; tilt.add(model); model.position.y = -0.7;
   const m = new THREE.Mesh(proto.geo, glbMaterial(proto, paint));
-  m.castShadow = true; m.receiveShadow = true;
+  // obstacle cars skip the shadow map (it would redraw every scanned body a second time); a blob grounds them
+  m.castShadow = false; m.receiveShadow = true;
   model.add(m);
+  const blob = new THREE.Mesh(blobGeo, blobMat);
+  blob.rotation.x = -Math.PI / 2; blob.position.y = 0.012;
+  if (proto === suvProto) blob.scale.set(1.08, 1.04, 1);
+  root.add(blob);
   return { root, tilt, model, wheels: [], blinkers: [], h: proto.h, isSuv: proto === suvProto };
 }
 function makeProto(gltf, name, length) {
@@ -505,7 +514,7 @@ const puffTex = (() => {
   g.putImageData(img, 0, 0);
   const t = new THREE.CanvasTexture(c); t.flipY = false; return t;
 })();
-const MAXP = SMALL ? 1700 : 2400;
+const MAXP = SMALL ? 1100 : 2000;
 const pPos = new Float32Array(MAXP * 3), pSize = new Float32Array(MAXP), pAlpha = new Float32Array(MAXP), pRot = new Float32Array(MAXP), pTint = new Float32Array(MAXP), pSoft = new Float32Array(MAXP);
 const pVel = new Float32Array(MAXP * 3), pLife = new Float32Array(MAXP), pMax = new Float32Array(MAXP), pS0 = new Float32Array(MAXP),
   pGrow = new Float32Array(MAXP), pA0 = new Float32Array(MAXP), pDrag = new Float32Array(MAXP), pRotV = new Float32Array(MAXP), pBuoy = new Float32Array(MAXP), pGnd = new Uint8Array(MAXP);
@@ -519,14 +528,14 @@ pGeo.setAttribute('aRot', attr(pRot, 1));
 pGeo.setAttribute('aTint', attr(pTint, 1));
 pGeo.setAttribute('aSoft', attr(pSoft, 1));
 const pMat = new THREE.ShaderMaterial({
-  uniforms: { map: { value: puffTex }, uScale: { value: 400 } },
+  uniforms: { map: { value: puffTex }, uScale: { value: 400 }, uMaxPx: { value: 200 } },
   vertexShader: `
     attribute float aSize; attribute float aAlpha; attribute float aRot; attribute float aTint; attribute float aSoft;
-    uniform float uScale; varying float vA; varying float vR; varying float vT; varying float vS;
+    uniform float uScale; uniform float uMaxPx; varying float vA; varying float vR; varying float vT; varying float vS;
     void main() {
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
       gl_Position = projectionMatrix * mv;
-      gl_PointSize = aSize * uScale / max(0.5, -mv.z);
+      gl_PointSize = min(aSize * uScale / max(0.5, -mv.z), uMaxPx);   // big near-camera puffs cost the most fill
       vA = aAlpha; vR = aRot; vT = aTint; vS = aSoft;
     }`,
   fragmentShader: `
@@ -586,6 +595,7 @@ const tmpV2 = new THREE.Vector2();
 function updatePointScale() {
   renderer.getDrawingBufferSize(tmpV2);
   pMat.uniforms.uScale.value = tmpV2.y / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+  pMat.uniforms.uMaxPx.value = tmpV2.y * 0.2;
 }
 
 // Jets follow the demo footage: thin straight plumes that move with the car instead of trailing behind it.
@@ -836,9 +846,20 @@ camera.aspect = innerWidth / innerHeight; pickPose();
 
 // ---------- loop ----------
 let last = performance.now(), clock = 0;
+let frameEma = 16.7, slowT = 0, fastT = 0, hudDist = '', hudSpd = '';
+function adaptResolution(ms, dt) {
+  if (ms > 250) return;                                   // returning from a background tab
+  frameEma += (ms - frameEma) * 0.1;
+  if (frameEma > 21) { slowT += dt; fastT = 0; } else if (frameEma < 17.5) { fastT += dt; slowT = 0; } else { slowT = fastT = 0; }
+  if (slowT > 1 && dpr > 1) { dpr = Math.max(1, dpr - 0.25); renderer.setPixelRatio(dpr); slowT = 0; }
+  else if (fastT > 6 && dpr < DPR_CAP) { dpr = Math.min(DPR_CAP, dpr + 0.25); renderer.setPixelRatio(dpr); fastT = 0; }
+}
 function tick(now) {
   requestAnimationFrame(tick);
-  const dt = Math.min(0.05, (now - last) / 1000); last = now; clock += dt;
+  if (now - last < 1000 / 61) return;                     // 90/120 Hz screens: render at most 60 fps
+  const frameMs = now - last;
+  const dt = Math.min(0.05, frameMs / 1000); last = now; clock += dt;
+  adaptResolution(frameMs, dt);
   let camT = state === 'idle' ? 0 : 1;
 
   if (state === 'intro') {
@@ -916,6 +937,7 @@ function tick(now) {
     o.z += dz; o.t += dt;
     if (o.update) o.update(dt);
     o.root.position.set(o.x, 0, o.z);
+    o.root.visible = o.z > -135;
     o.blinkers.forEach(b => { b.visible = blinkOn; });
     if (o.smoke && o.z > -80 && Math.random() < dt * 7) {
       const p = pick(o.smoke);
@@ -942,8 +964,9 @@ function tick(now) {
   camera.lookAt(camLook);
 
   if (state === 'run') {
-    elDist.textContent = fmt(dist);
-    elSpd.textContent = Math.round(speed * 3.6 * 1.25) + ' km/h';
+    const d = fmt(dist), sp = Math.round(speed * 3.6 * 1.25) + ' km/h';
+    if (d !== hudDist) elDist.textContent = hudDist = d;
+    if (sp !== hudSpd) elSpd.textContent = hudSpd = sp;
   }
   sfx.engine(worldSpeed, state === 'run' || state === 'intro');
   renderer.render(scene, camera);
