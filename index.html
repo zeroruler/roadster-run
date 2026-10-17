@@ -549,7 +549,7 @@ const pMat = new THREE.ShaderMaterial({
       // one flat tone; the wispy texture carries the shape, so overlaps read as smoke, not dots
       float a = t.a * vA * mix(0.85, 1.0, vS);
       if (a < 0.01) discard;
-      vec3 col = vec3(0.91, 0.92, 0.935) * vT;
+      vec3 col = vec3(0.875, 0.885, 0.9) * vT;
       gl_FragColor = vec4(col, a);
     }`,
   transparent: true, depthWrite: false,
@@ -857,7 +857,6 @@ function adaptResolution(ms, dt) {
 }
 function tick(now) {
   requestAnimationFrame(tick);
-  if (now - last < 1000 / 61) return;                     // 90/120 Hz screens: render at most 60 fps
   const frameMs = now - last;
   const dt = Math.min(0.05, frameMs / 1000); last = now; clock += dt;
   adaptResolution(frameMs, dt);
