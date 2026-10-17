@@ -13,3 +13,4 @@
 - `car.glb` — 텍스처를 1024px로 줄인 차 모델 원본
 - `suv.js` / `suv.glb` — 장애물용 SUV 모델 (같은 방식)
 - `truck.js` / `truck.glb` — 킥플립으로 넘는 컨테이너 트럭 모델 (같은 방식)
+- `flatbed.js` / `flatbed.glb`, `coil.js` / `coil.glb` — 코일을 싣고 지나가는 평판 트럭과 굴러오는 강철 코일 (같은 방식)

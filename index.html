@@ -481,6 +481,46 @@ function useCar(gltf) {
 }
 function useSuv(gltf) { suvProto = makeProto(gltf, 'suv', SUV_L); }
 // the scan already lies along x, which is exactly how it parks: broadside across the lane
+// steel coil: the scan is squashed and short, so it is made round and stretched 1.6x along its axis,
+// then turned so it rolls along the road (axis across the lane)
+const COIL_R = 0.9, COIL_STRETCH = 2.2, COIL_DROP_Z = -90;   // where the coil leaves the truck: close enough to read clearly
+const coilMat = shared(new THREE.MeshStandardMaterial({ color: 0xa7b0ba, metalness: 0.85, roughness: 0.32 }));
+let coilGeo = (() => { const g = new THREE.CylinderGeometry(COIL_R, COIL_R, 1.4, 32); g.rotateZ(Math.PI / 2); return shared(g); })();
+let COIL_W = 1.4;
+function useCoil(gltf) {
+  let src = null;
+  gltf.scene.traverse(o => { if (o.isMesh && !src) src = o; });
+  if (!src) return;
+  const g = src.geometry.clone();
+  g.computeBoundingBox();
+  const bb = g.boundingBox, D = bb.max.x - bb.min.x, H = bb.max.y - bb.min.y, W = bb.max.z - bb.min.z;
+  const cx = (bb.min.x + bb.max.x) / 2, cy = (bb.min.y + bb.max.y) / 2, cz = (bb.min.z + bb.max.z) / 2;
+  const k = (COIL_R * 2) / D;
+  g.translate(-cx, -cy, -cz);
+  g.scale(k, k * D / H, k * COIL_STRETCH);
+  g.rotateY(Math.PI / 2);
+  g.computeVertexNormals();
+  COIL_W = W * k * COIL_STRETCH;
+  coilGeo = shared(g);
+}
+// flatbed coil carrier: an untextured scan, cab at -x, flat bed over the rear two thirds
+let flatbedProto = null;
+const FLATBED_L = 12;
+const flatbedMat = shared(new THREE.MeshStandardMaterial({ color: 0x7d9585, roughness: 0.55, metalness: 0.25 }));
+function useFlatbed(gltf) {
+  let src = null;
+  gltf.scene.traverse(o => { if (o.isMesh && !src) src = o; });
+  if (!src) return;
+  const g = src.geometry.clone();
+  g.computeBoundingBox();
+  const bb = g.boundingBox, L = bb.max.x - bb.min.x, H = bb.max.y - bb.min.y, k = FLATBED_L / L;
+  const bedTop = H * 0.465 * k;                      // deck height read off the scan's side profile
+  const bedFrom = (-0.5 + 0.33) * FLATBED_L, bedTo = 0.48 * FLATBED_L;
+  g.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+  g.scale(k, k, k);
+  g.computeVertexNormals();
+  flatbedProto = { geo: shared(g), mat: flatbedMat, bedTop, bedFrom, bedTo };
+}
 function useTruck(gltf) {
   truckProto = makeProto(gltf, 'truck', 0, { yaw: 0, height: TRUCK_H });
   if (truckProto) truckProto.mat.color.setHex(0xd9dee6);   // a faint cool tint so the white box separates from the floor
@@ -508,7 +548,9 @@ function loadGlb() {
   if (!THREE.GLTFLoader) return;
   // the player's car first; the SUV follows once it is in
   loadModel('car.js', 'CAR_GLB_B64', useCar, () => loadModel('suv.js', 'SUV_GLB_B64', useSuv,
-    () => loadModel('truck.js', 'TRUCK_GLB_B64', useTruck)));
+    () => loadModel('truck.js', 'TRUCK_GLB_B64', useTruck,
+      () => loadModel('coil.js', 'COIL_GLB_B64', useCoil,
+        () => loadModel('flatbed.js', 'FLATBED_GLB_B64', useFlatbed)))));
 }
 
 const car = buildCar(paints.pearl);
@@ -759,6 +801,69 @@ function spawnObstacle(kind, z) {
       o.suv.root.rotation.y = o.side * Math.PI / 2 + o.side * 0.2 * e;
       o.suv.wheels.forEach(w => { w.spin.rotation.x -= (1 - e) * 0.4; });
     };
+  } else if (kind === 'coil') {
+    // a truck crosses far ahead; a steel coil slips off its tail over the lane, bounces, and rolls at the car
+    const d = Math.random() < 0.5 ? 1 : -1;
+    const flip = d > 0 ? -1 : 1;                     // cab sits at -x in the scans; turn it to lead
+    const rig = new THREE.Group(); root.add(rig);
+    let top, tail;
+    if (flatbedProto) {
+      const truck = new THREE.Mesh(flatbedProto.geo, flatbedProto.mat);
+      truck.castShadow = true; truck.receiveShadow = true;
+      if (flip < 0) truck.rotation.y = Math.PI;
+      rig.add(truck);
+      top = flatbedProto.bedTop;
+      // three coils along the deck, eyes fore and aft; the rearmost one is the one that comes loose
+      const a = flatbedProto.bedFrom + COIL_W / 2 + 0.4, b = flatbedProto.bedTo - COIL_W / 2 - 0.3;
+      for (let i = 0; i < 2; i++) {
+        const c = new THREE.Mesh(coilGeo, coilMat); c.castShadow = true;
+        c.position.set(flip * (a + (b - a) * i / 2), top + COIL_R, 0); rig.add(c);
+      }
+      tail = flip * b;
+    } else {
+      const truck = truckProto ? new THREE.Mesh(truckProto.geo, truckProto.mat) : box(11, 2.6, 2.5, trailerMat);
+      if (!truckProto) truck.position.y = 1.3;
+      if (truckProto && flip < 0) truck.rotation.y = Math.PI;
+      truck.castShadow = true; truck.receiveShadow = true;
+      rig.add(truck);
+      const len = truckProto ? truckProto.sizeX : 11;
+      top = truckProto ? truckProto.h : 2.6;
+      tail = -d * (len / 2 - 1.4);
+    }
+    const coil = new THREE.Mesh(coilGeo, coilMat); coil.castShadow = true; coil.receiveShadow = true;
+    root.add(coil);
+    const st = { phase: 'ride', tx: -d * 40, tz: 0, cx: 0, cy: top + COIL_R, vx: 0, vy: 0, roll: 0, spin: 0 };
+    o.x = 0; o.hw = COIL_W / 2; o.hd = COIL_R; o.h = 0; o.rollV = 0; o.st = st;
+    o.update = dt => {
+      // the crossing is timed to the road, so the tail passes over the lane exactly at COIL_DROP_Z
+      if (st.phase === 'ride') st.tx = -tail + d * 15 * (o.z - COIL_DROP_Z) / Math.max(speed, 10);
+      else st.tx += d * 15 * dt;
+      st.tz -= st.roll * dt;                 // the truck stays put on the road while the root follows the coil
+      rig.position.set(st.tx, 0, st.tz);
+      if (st.phase === 'ride') {
+        st.cx = st.tx + tail;
+        coil.position.set(st.cx, st.cy, st.tz);
+        if (o.z >= COIL_DROP_Z) { st.phase = 'fall'; st.vx = d * 3; }
+      } else {
+        st.vx *= Math.exp(-3 * dt); st.cx += st.vx * dt; st.cx += (0 - st.cx) * Math.min(1, dt * 2.5);
+        if (st.phase === 'fall') {
+          st.vy -= 26 * dt; st.cy += st.vy * dt;
+          if (st.cy <= COIL_R) {
+            st.cy = COIL_R;
+            for (let i = 0; i < 16; i++) emit(o.x + st.cx + rand(-1, 1), 0.2, o.z + rand(-0.8, 0.8), rand(-3, 3), rand(0.3, 1.2), rand(-2, 2), rand(0.5, 0.9), 0.6, 1.6, 0.5, 2, 0.9, 0, 0);
+            if (Math.abs(st.vy) > 3) st.vy = -st.vy * 0.3; else { st.vy = 0; st.phase = 'roll'; }
+          }
+        }
+        // rolls toward the car a quarter faster than the road, capped, so its timing reads differently
+        if (st.cy <= COIL_R + 0.25) st.roll += (Math.min(12, speed * 0.25) - st.roll) * Math.min(1, dt * 3);
+        o.z += st.roll * dt;
+        st.spin += st.roll / COIL_R * dt;
+        coil.position.set(st.cx, st.cy, 0);
+        coil.rotation.x = st.spin;
+      }
+      o.rollV = st.roll;
+      o.h = st.phase === 'ride' ? 0 : st.cy + COIL_R;
+    };
   } else if (kind === 'trailer' && truckProto) {
     const t = new THREE.Mesh(truckProto.geo, truckProto.mat);
     t.castShadow = true; t.receiveShadow = true;
@@ -838,6 +943,8 @@ function chooseKind() {
   // the truck turns up more as the run speeds up: ~13% of picks at 135 km/h, capped near 35% from ~234 km/h,
   // and never twice in a row
   if (dist > 520 && lastKind !== 'trailer') w.push(['trailer', 1.3 + 3.3 * smooth(30, 52, speed)]);
+  // the rolling coil arrives faster than everything else; late-game only, growing with speed, never back to back
+  if (dist > 800 && lastKind !== 'coil') w.push(['coil', 0.8 + 2.2 * smooth(34, 54, speed)]);
   let r = Math.random() * w.reduce((s, [, v]) => s + v, 0);
   for (const [k, v] of w) if ((r -= v) <= 0) return k;
   return 'tires';
@@ -880,7 +987,7 @@ function crash(o) {
   for (let i = 0; i < 30; i++) emit(rand(-1.2, 1.2), rand(0.3, 1.4), rand(-2.6, -1.8), rand(-3, 3), rand(0.5, 2.5), rand(-2, 1), rand(0.9, 1.6), 0.8, 2.2, 0.65, 1.2, rand(0.85, 0.95), 0.4, 0);
   const isBest = dist > best;
   if (isBest) { best = dist; try { localStorage.setItem('roadster-best', String(Math.floor(best))); } catch (e) {} }
-  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · CONTAINER TRUCK' };
+  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · CONTAINER TRUCK', coil: 'CRASH · STEEL COIL' };
   overShownAt = 0;
   clearTimeout(overTimer);
   overTimer = setTimeout(() => {
@@ -970,7 +1077,7 @@ function tick(now) {
       spawnObstacle(kind, SPAWN_Z);
       lastKind = kind; sinceSpawn = 0;
       const minT = clamp(1.25 - dist / 6000, 0.95, 1.25);
-      gap = speed * rand(minT, minT + 0.9) + 16 + (kind === 'trailer' ? 14 : 0);
+      gap = speed * rand(minT, minT + 0.9) + 16 + (kind === 'trailer' ? 14 : 0) + (kind === 'coil' ? 26 : 0);
     }
   }
 
