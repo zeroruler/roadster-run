@@ -11,3 +11,4 @@
 - `index.html` — 게임 전체 (Three.js r128)
 - `car.js` — 차 모델(GLB)을 base64로 담은 스크립트, 페이지가 비동기로 불러옵니다
 - `car.glb` — 텍스처를 1024px로 줄인 차 모델 원본
+- `suv.js` / `suv.glb` — 장애물용 SUV 모델 (같은 방식)

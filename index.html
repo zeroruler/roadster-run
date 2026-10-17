@@ -391,42 +391,41 @@ function buildCar(paint, opts = {}) {
   return { root, tilt, model, wheels, blinkers };
 }
 
-// ---------- scanned car model (car.js carries the GLB as base64) ----------
-let carProto = null;
-const GLB_YAW = -Math.PI / 2;           // the scan's nose points to -x; turn it to face -z
+// ---------- scanned car models (car.js and suv.js carry the GLBs as base64) ----------
+let carProto = null;                    // Model 3 scan: the player and most obstacle cars
+let suvProto = null;                    // Sorento scan: the villain and some wrecks
+const GLB_YAW = -Math.PI / 2;           // both scans point their nose to -x; turn them to face -z
+const SUV_L = 4.8;
 const TINTS = new Map([['silver', 0xb9bdc3], ['graphite', 0x62666e], ['black', 0x2b2c30], ['slate', 0x939cab]]);
 const tintCache = new Map();
 function paintName(paint) { for (const k in paints) if (paints[k] === paint) return k; return 'pearl'; }
-function glbMaterial(paint) {
+function glbMaterial(proto, paint) {
   const name = paintName(paint);
-  if (name === 'pearl' || !TINTS.has(name)) return carProto.mat;
-  if (!tintCache.has(name)) {
-    const m = carProto.mat.clone(); m.color.setHex(TINTS.get(name)); shared(m); tintCache.set(name, m);
+  if (name === 'pearl' || !TINTS.has(name)) return proto.mat;
+  const key = proto.name + ':' + name;
+  if (!tintCache.has(key)) {
+    const m = proto.mat.clone(); m.color.setHex(TINTS.get(name)); shared(m); tintCache.set(key, m);
   }
-  return tintCache.get(name);
+  return tintCache.get(key);
 }
 function buildGlbCar(paint, opts) {
+  const proto = opts.suv && suvProto ? suvProto : carProto;
   const root = new THREE.Group(), tilt = new THREE.Group(), model = new THREE.Group();
   root.add(tilt); tilt.position.y = 0.7; tilt.add(model); model.position.y = -0.7;
-  const m = new THREE.Mesh(carProto.geo, glbMaterial(paint));
+  const m = new THREE.Mesh(proto.geo, glbMaterial(proto, paint));
   m.castShadow = true; m.receiveShadow = true;
   model.add(m);
-  const blinkers = [];
-  if (opts.hazard) {
-    [[-0.7, CAR_Z0 + 0.05, 0.62], [0.7, CAR_Z0 + 0.05, 0.62], [-0.72, -CAR_Z0 - 0.05, 0.85], [0.72, -CAR_Z0 - 0.05, 0.85]].forEach(([x, z, y]) => {
-      const b = box(0.16, 0.07, 0.08, amberMat, false); b.position.set(x, y, z); model.add(b); blinkers.push(b);
-    });
-  }
-  return { root, tilt, model, wheels: [], blinkers };
+  return { root, tilt, model, wheels: [], blinkers: [], h: proto.h, isSuv: proto === suvProto };
 }
-function useGlb(gltf) {
+function makeProto(gltf, name, length) {
   let src = null;
   gltf.scene.traverse(o => { if (o.isMesh && !src) src = o; });
-  if (!src) return;
+  if (!src) return null;
   const geo = src.geometry.clone();
   geo.rotateY(GLB_YAW);
   geo.computeBoundingBox();
-  const bb = geo.boundingBox, len = bb.max.z - bb.min.z, k = CAR_L / len;
+  const bb = geo.boundingBox, k = length / (bb.max.z - bb.min.z);
+  const height = (bb.max.y - bb.min.y) * k;   // read now: translate/scale below rewrite the box in place
   geo.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
   geo.scale(k, k, k);
   shared(geo);
@@ -436,27 +435,42 @@ function useGlb(gltf) {
   mat.envMapIntensity = 0.85;
   mat.needsUpdate = true;
   shared(mat);
-  carProto = { geo, mat };
+  return { name, geo, mat, h: height };
+}
+function useCar(gltf) {
+  carProto = makeProto(gltf, 'sedan', CAR_L);
+  if (!carProto) return;
   // swap the player's car body in place; the rig, shadow and steam stay as they are
   car.model.clear();
-  car.model.add(new THREE.Mesh(geo, mat));
-  car.model.children[0].castShadow = true; car.model.children[0].receiveShadow = true;
+  const m = new THREE.Mesh(carProto.geo, carProto.mat);
+  m.castShadow = true; m.receiveShadow = true;
+  car.model.add(m);
   car.wheels.length = 0;
+}
+function useSuv(gltf) { suvProto = makeProto(gltf, 'suv', SUV_L); }
+function loadModel(src, key, onModel, next) {
+  const s = document.createElement('script');
+  s.src = src; s.async = true;
+  s.onload = () => {
+    try {
+      const b64 = window[key];
+      if (b64) {
+        const bin = atob(b64), buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        window[key] = null;
+        new THREE.GLTFLoader().parse(buf.buffer, '', g => { onModel(g); if (next) next(); }, () => { if (next) next(); });
+        return;
+      }
+    } catch (e) {}
+    if (next) next();
+  };
+  s.onerror = () => { if (next) next(); };
+  document.head.appendChild(s);
 }
 function loadGlb() {
   if (!THREE.GLTFLoader) return;
-  const s = document.createElement('script');
-  s.src = 'car.js'; s.async = true;
-  s.onload = () => {
-    try {
-      const b64 = window.CAR_GLB_B64; if (!b64) return;
-      const bin = atob(b64), buf = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-      window.CAR_GLB_B64 = null;
-      new THREE.GLTFLoader().parse(buf.buffer, '', useGlb, () => {});
-    } catch (e) {}
-  };
-  document.head.appendChild(s);
+  // the player's car first; the SUV follows once it is in
+  loadModel('car.js', 'CAR_GLB_B64', useCar, () => loadModel('suv.js', 'SUV_GLB_B64', useSuv));
 }
 
 const car = buildCar(paints.pearl);
@@ -575,7 +589,7 @@ function updatePointScale() {
 }
 
 // Jets follow the demo footage: thin straight plumes that move with the car instead of trailing behind it.
-let jumpJetT = 0, flipSide = 1;
+let jumpJetT = 0, flipJetT = 0, flipSide = 1;
 const WHEEL_POS = [[-WHEEL_X, WHEEL_Z[0]], [WHEEL_X, WHEEL_Z[0]], [-WHEEL_X, WHEEL_Z[1]], [WHEEL_X, WHEEL_Z[1]]];
 // spread each puff along the stretch it would have covered this frame, so a fast jet reads as one unbroken streak
 function jetPuff(x, y, z, dx, dy, dz, sp, dt, spread, size, grow, life, drag = 0.9, fade = 0.7) {
@@ -592,51 +606,15 @@ function jumpJets(n, y, dt) {
       rand(0.22, 0.3), rand(0.65, 0.9), rand(0.45, 0.7));
   }
 }
-// kickflip: two straight rods of steam fixed to one flank, front and rear. They are part of the
-// car rig, so they roll with the body like thrusters bolted to its side.
-const rodGeo = new THREE.CylinderGeometry(0.42, 0.12, 3.0, 18, 1, true);
-rodGeo.translate(0, 1.5, 0); rodGeo.rotateZ(-Math.PI / 2);     // nozzle at the origin, plume along +x
-const rodMat = new THREE.ShaderMaterial({
-  uniforms: { uA: { value: 0 }, uT: { value: 0 } },
-  vertexShader: `
-    varying float vV; varying vec3 vN; varying vec3 vP;
-    void main() {
-      vV = uv.y;
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      vP = mv.xyz; vN = normalMatrix * normal;
-      gl_Position = projectionMatrix * mv;
-    }`,
-  fragmentShader: `
-    uniform float uA; uniform float uT; varying float vV; varying vec3 vN; varying vec3 vP;
-    void main() {
-      float facing = abs(dot(normalize(vN), normalize(-vP)));          // soft round edge, dense core
-      float along = smoothstep(0.0, 0.05, vV) * pow(1.0 - vV, 0.9);    // solid at the nozzle, dissolving at the tip
-      float flick = 0.86 + 0.14 * sin(vV * 26.0 - uT * 60.0);
-      float a = uA * along * pow(facing, 0.9) * flick;
-      if (a < 0.01) discard;
-      gl_FragColor = vec4(0.86, 0.875, 0.895, a);
-    }`,
-  transparent: true, depthWrite: false, side: THREE.DoubleSide,
-});
-const ROD_T = 0.55;
-let rodT = 0;
-const rods = [];
-for (const s of [-1, 1]) for (const zf of [-1, 1]) {
-  const m = new THREE.Mesh(rodGeo, rodMat);
-  m.position.set(s * 0.95, 0.02, zf * 1.15);
-  m.rotation.y = s * zf * -0.3;               // splay front and rear rods into a shallow V
-  m.userData = { s };
-  m.visible = false; m.renderOrder = 3;
-  car.tilt.add(m); rods.push(m);
-}
-function updateRods(dt) {
-  if (rodT > 0) rodT = Math.max(0, rodT - dt);
-  const on = rodT > 0;
-  const k = on ? Math.min(1, (ROD_T - rodT) / 0.05) * Math.min(1, rodT / 0.14) : 0;
-  rodMat.uniforms.uA.value = k;
-  rodMat.uniforms.uT.value += dt;
-  const len = (0.35 + 0.65 * Math.min(1, (ROD_T - rodT) / 0.06)) * (0.94 + 0.06 * Math.sin(rodMat.uniforms.uT.value * 70));
-  for (const m of rods) { m.visible = on && m.userData.s === flipSide; m.scale.set(m.userData.s * len, 1, 1); }
+// kickflip: two horizontal plumes from one flank, front and rear, splayed into a V.
+// They hold their direction while the body rolls, so the spray never gets flung around.
+function flipJets(n, y, dt) {
+  const s = flipSide;
+  for (const [pz, dzz] of [[-1.15, -0.32], [1.15, 0.32]]) for (let i = 0; i < n; i++) {
+    // same puff size as the vertical jets; faster exit and harder braking read as a stronger blast
+    jetPuff(s * 1.0, y + 0.7, pz, s, 0.04, dzz, rand(32, 38), dt, 0.3,
+      rand(0.22, 0.3), rand(0.65, 0.9), rand(0.3, 0.4), 8.5, 2.0);
+  }
 }
 
 // ---------- obstacles ----------
@@ -684,19 +662,19 @@ function spawnObstacle(kind, z) {
     o.h = H * 0.38 + 0.02; o.hd = 0.55;
   } else if (kind === 'crash') {
     const side = Math.random() < 0.5 ? -1 : 1;
-    const c1 = buildCar(pick([paints.silver, paints.graphite, paints.slate]), { hazard: true });
+    const c1 = buildCar(pick([paints.silver, paints.graphite, paints.slate]), { suv: Math.random() < 0.4 });
     c1.root.rotation.y = Math.PI / 2 + rand(-0.25, 0.25);
     c1.tilt.rotation.z = rand(-0.04, 0.04);
-    const c2 = buildCar(pick([paints.black, paints.silver, paints.pearl]), { hazard: true });
+    const c2 = buildCar(pick([paints.black, paints.silver, paints.pearl]), { suv: Math.random() < 0.4 });
     c2.root.position.set(side * 3.4, 0, -2.6); c2.root.rotation.y = side * 0.8 + Math.PI;
     root.add(c1.root, c2.root);
     o.blinkers = c1.blinkers.concat(c2.blinkers);
     root.add(cone(-side * 3.2, -4.2), cone(-side * 3.9, -5.2), triangle(0, -7));
-    o.h = 1.45; o.hd = 1.0;
+    o.h = (c1.h || 1.43) + 0.02; o.hd = 1.0;
     o.smoke = [new THREE.Vector3(-side * 2.0, 0.9, 0), new THREE.Vector3(side * 2.4, 0.9, -1.4)];
   } else if (kind === 'villain') {
-    const s = buildCar(paints.black);
-    s.root.scale.set(1.08, 1.2, 1.05);
+    const s = buildCar(paints.black, { suv: true });
+    if (!s.isSuv) s.root.scale.set(1.08, 1.2, 1.05);   // stand-in until the SUV scan has loaded
     const side = Math.random() < 0.5 ? -1 : 1;
     root.add(s.root);
     o.startX = side * 14; o.x = o.startX; o.hw = 2.6; o.h = 1.72; o.hd = 1.1; o.side = side; o.suv = s;
@@ -769,7 +747,7 @@ car.root.rotation.y = IDLE_YAW;
 function resetRun() {
   obstacles.splice(0).forEach(removeObstacle);
   speed = START_SPEED; worldSpeed = speed; dist = 0; sinceSpawn = 0; gap = 60; lastKind = '';
-  y = 0; vy = 0; airborne = false; flipLeft = 0; flipT = 0; spinV = 0; jumpJetT = 0; rodT = 0; flipLiftT = 0; camY = 0;
+  y = 0; vy = 0; airborne = false; flipLeft = 0; flipT = 0; spinV = 0; jumpJetT = 0; flipJetT = 0; flipLiftT = 0; camY = 0;
   car.root.rotation.set(0, 0, 0); car.tilt.rotation.set(0, 0, 0);
   elThr.classList.remove('spent');
 }
@@ -800,7 +778,7 @@ function jump() {
   } else if (flipLeft > 0) {
     flipLeft = 0; flipLiftT = 0.15; flipTargetV = Math.min(Math.max(vy, 0) + 6.5, 12);
     flipT = FLIP; flipDir = Math.random() < 0.5 ? 1 : -1; flipSide = flipDir;
-    rodT = ROD_T;
+    flipJetT = 0.45;
     sfx.flip(); buzz(15); elThr.classList.add('spent');
   }
 }
@@ -927,8 +905,7 @@ function tick(now) {
   const upright = Math.cos(car.tilt.rotation.z) > 0.8;
   if (jumpJetT > 0) { jumpJetT -= dt; jumpJets(Math.ceil(dt * 300), y, dt); }
   else if (airborne && state === 'run' && upright && y > 0.15) jumpJets(Math.floor(dt * 120 + Math.random()), y, dt);
-  updateRods(state === 'run' ? dt : 0);
-  if (state === 'over') rodT = 0;
+  if (flipJetT > 0) { flipJetT -= dt; flipJets(Math.ceil(dt * 650), y, dt); }
 
   roadTex.offset.y = (roadTex.offset.y + dz / TILE) % 1;
 
