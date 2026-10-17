@@ -417,6 +417,26 @@ let suvProto = null;                    // Sorento scan: the villain and some wr
 let truckProto = null;                  // container truck scan: parked across the road, kickflip only
 const TRUCK_H = 3.2;                    // above a plain jump's 2.9 m peak; a kickflip still clears it
 const TRUCK_CROSS = 10;                 // the crossing truck's speed across the road, m/s
+const WRONGWAY_V = 16;                  // the wrong-way truck's own speed toward the car, m/s
+const WRONGWAY_WIDEN = 1.35;            // the scan reads thin head-on; widen just this one
+const WRONGWAY_LAG = 40;                // road metres the truck arrives after its warning sign
+// Korean "no straight ahead" sign: white disc, red rim, black up arrow, red slash
+const signFaceMat = shared(new THREE.MeshBasicMaterial({ map: canvasTex(256, 256, (g, w) => {
+  const c = w / 2;
+  g.fillStyle = '#ffffff'; g.beginPath(); g.arc(c, c, c, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = '#d01f2e'; g.lineWidth = 26; g.beginPath(); g.arc(c, c, c - 15, 0, Math.PI * 2); g.stroke();
+  g.fillStyle = '#16171a';
+  g.fillRect(c - 13, c - 30, 26, 112);
+  g.beginPath(); g.moveTo(c, 34); g.lineTo(c + 50, c - 24); g.lineTo(c - 50, c - 24); g.closePath(); g.fill();
+  g.strokeStyle = '#d01f2e'; g.lineWidth = 22; g.lineCap = 'butt';
+  g.beginPath(); g.moveTo(c - 72, c - 72); g.lineTo(c + 72, c + 72); g.stroke();
+}), transparent: true }));
+const signFaceGeo = shared(new THREE.CircleGeometry(1.0, 40));
+const signBackGeo = shared(new THREE.CylinderGeometry(1.03, 1.03, 0.05, 40).rotateX(Math.PI / 2));
+const signPoleGeo = shared(new THREE.CylinderGeometry(0.06, 0.06, 3.4, 10));
+const signBackMat = shared(std(0x9aa0a8, { metalness: 0.5, roughness: 0.4 }));
+const beamMat = shared(new THREE.MeshBasicMaterial({ color: 0xffcf5c }));
+const beamGeo = shared(new THREE.PlaneGeometry(1.5, 1.1));
 const GLB_YAW = -Math.PI / 2;           // both scans point their nose to -x; turn them to face -z
 const SUV_L = 4.8;
 const TINTS = new Map([['silver', 0xb9bdc3], ['graphite', 0x62666e], ['black', 0x2b2c30], ['slate', 0x939cab]]);
@@ -912,6 +932,46 @@ function spawnObstacle(kind, z) {
       else if (state === 'run') o.x = o.vx * o.z / Math.max(speed, 10);
       else o.x += o.vx * dt;                               // someone else crashed: it just drives on
     };
+  } else if (kind === 'wrongway') {
+    // the same truck coming down the lane the wrong way, flashing its high beams; only a kickflip clears it
+    const t = new THREE.Mesh(truckProto.geo, truckProto.mat);
+    t.castShadow = true; t.receiveShadow = true;
+    t.rotation.y = Math.PI / 2;                           // cab (at -x in the scan) toward the car
+    t.scale.z = WRONGWAY_WIDEN;                           // the scan's width, so it fills the lane head-on
+    root.add(t);
+    const front = truckProto.sizeX / 2, halfW = truckProto.sizeZ / 2 * WRONGWAY_WIDEN;
+    const haloMat = new THREE.MeshBasicMaterial({ map: softTex, color: 0xffb830, transparent: true, opacity: 0.85, depthWrite: false });
+    const beams = [-1, 1].map(s => {
+      const b = new THREE.Group(); b.position.set(s * 0.8 * WRONGWAY_WIDEN, 0.95, front + 0.05);
+      const lamp = box(0.4, 0.2, 0.05, beamMat, false), halo = new THREE.Mesh(beamGeo, haloMat);
+      halo.position.z = 0.05; b.add(lamp, halo); root.add(b); return b;
+    });
+    o.vt = WRONGWAY_V;
+    o.hw = halfW; o.h = truckProto.h + 0.02; o.hd = truckProto.sizeX / 2 + 0.1;
+    // where its wheels meet the road: steer axle, drive axle, trailer bogie
+    const axles = [front - 1.6, front - 5.2, -front + 1.6];
+    o.update = dt => {
+      // brakes hard once anything has crashed, so it never drives through the wreck
+      if (o.hit) o.vt = 0;                                // head-on: stopped dead, only the knock moves it
+      else if (state !== 'run') o.vt *= Math.exp(-2.5 * dt);
+      o.z += o.vt * dt;
+      // road spray from every axle stays on the road, so the truck visibly pulls away from its own wake
+      if (o.vt > 2 && o.z > -110) for (const az of axles) for (const s of [-1, 1]) if (Math.random() < dt * 26) {
+        emit(o.x + s * (halfW - 0.25), 0.25, o.z + az, s * rand(0.6, 2.2), rand(0.3, 1.3), o.vt * rand(0.2, 0.4),
+          rand(0.6, 1.0), 0.55, 1.5, 0.5, 1.6, rand(0.66, 0.74), 0, 0);
+      }
+      const on = state === 'run' && Math.floor(o.t * 5) % 2 === 0;
+      beams.forEach(b => { b.visible = on; });
+    };
+  } else if (kind === 'nostraight') {
+    // a lone "no straight ahead" sign on the right shoulder; the wrong-way truck comes up behind it.
+    // Scenery only, never hit (h stays 0).
+    const sign = new THREE.Group(); sign.position.set(4.8, 0, 0); sign.rotation.y = -0.18;   // turned a touch toward the road
+    const pole = new THREE.Mesh(signPoleGeo, signBackMat); pole.position.y = 1.7; pole.castShadow = true;
+    const face = new THREE.Mesh(signFaceGeo, signFaceMat); face.position.set(0, 3.5, 0.08);
+    const back = new THREE.Mesh(signBackGeo, signBackMat); back.position.set(0, 3.5, 0.02); back.castShadow = true;
+    sign.add(pole, back, face); root.add(sign);
+    o.hw = 0; o.h = 0;
   } else if (kind === 'trailer') {
     const body = box(11, 1.95, 2.5, trailerMat); body.position.y = 1.62;
     const deck = box(11, 0.18, 2.4, trimMat); deck.position.y = 0.66;
@@ -988,6 +1048,8 @@ function chooseKind() {
   if (dist > 800 && lastKind !== 'coil') w.push(['coil', 0.8 + 2.2 * smooth(34, 54, speed)]);
   // past 2 km the container truck also drives across the road, timed to be broadside over the lane
   if (dist > 2000 && truckProto && lastKind !== 'crossing') w.push(['crossing', 1.4 + 1.6 * smooth(44, 56, speed)]);
+  // past 5 km it also comes straight down the lane the wrong way
+  if (dist > 5000 && truckProto && lastKind !== 'wrongway') w.push(['wrongway', 2]);
   let r = Math.random() * w.reduce((s, [, v]) => s + v, 0);
   for (const [k, v] of w) if ((r -= v) <= 0) return k;
   return 'tires';
@@ -1036,7 +1098,7 @@ function crash(o) {
       worldSpeed = -Math.min(9, speed * 0.25); crashDecay = 4;   // recoil: the world moves away for a moment
       vy = 7; airborne = true; spinV = rand(-5, 5) || 3;
       // what was hit gives a little too: a truck barely shifts, a car is shoved a bit further and twists
-      const heavy = o.kind === 'trailer' || o.kind === 'crossing';
+      const heavy = o.kind === 'trailer' || o.kind === 'crossing' || o.kind === 'wrongway';
       o.kv = -Math.min(heavy ? 3 : 6, speed * (heavy ? 0.07 : 0.14));
       o.yawV = (Math.random() < 0.5 ? -1 : 1) * (heavy ? rand(0.06, 0.12) : rand(0.3, 0.6));
       o.hit = true;                                       // a crossing truck brakes to a stop
@@ -1049,7 +1111,7 @@ function crash(o) {
   for (let i = 0; i < 30; i++) emit(rand(-1.2, 1.2), rand(0.3, 1.4), rand(-2.6, -1.8), rand(-3, 3), rand(0.5, 2.5), rand(-2, 1), rand(0.9, 1.6), 0.8, 2.2, 0.65, 1.2, rand(0.85, 0.95), 0.4, 0);
   const isBest = dist > best;
   if (isBest) { best = dist; try { localStorage.setItem('roadster-best', String(Math.floor(best))); } catch (e) {} }
-  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · CONTAINER TRUCK', crossing: 'CRASH · CONTAINER TRUCK', coil: 'CRASH · STEEL COIL' };
+  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · CONTAINER TRUCK', crossing: 'CRASH · CONTAINER TRUCK', wrongway: 'CRASH · WRONG-WAY TRUCK', coil: 'CRASH · STEEL COIL' };
   overShownAt = 0;
   clearTimeout(overTimer);
   overTimer = setTimeout(() => {
@@ -1136,10 +1198,15 @@ function tick(now) {
     sinceSpawn += dz;
     if (sinceSpawn >= gap) {
       const kind = chooseKind();
-      spawnObstacle(kind, SPAWN_Z);
+      // the wrong-way truck starts further out so it still arrives when a parked obstacle would
+      if (kind === 'wrongway') {
+        // the sign shows up first; the truck starts far enough out to reach the car WRONGWAY_LAG road metres later
+        spawnObstacle('nostraight', SPAWN_Z);
+        spawnObstacle(kind, (SPAWN_Z - WRONGWAY_LAG) * (speed + WRONGWAY_V) / speed);
+      } else spawnObstacle(kind, SPAWN_Z);
       lastKind = kind; sinceSpawn = 0;
       const minT = clamp(1.25 - dist / 6000, 0.95, 1.25);
-      gap = speed * rand(minT, minT + 0.9) + 16 + (kind === 'trailer' || kind === 'crossing' ? 14 : 0) + (kind === 'coil' ? 26 : 0);
+      gap = speed * rand(minT, minT + 0.9) + 16 + (kind === 'trailer' || kind === 'crossing' || kind === 'wrongway' ? 14 : 0) + (kind === 'coil' ? 26 : 0) + (kind === 'wrongway' ? WRONGWAY_LAG : 0);
     }
   }
 
