@@ -414,6 +414,8 @@ function buildCar(paint, opts = {}) {
 // ---------- scanned car models (car.js and suv.js carry the GLBs as base64) ----------
 let carProto = null;                    // Model 3 scan: the player and most obstacle cars
 let suvProto = null;                    // Sorento scan: the villain and some wrecks
+let truckProto = null;                  // container truck scan: parked across the road, kickflip only
+const TRUCK_H = 2.65;                   // scaled to this height so a kickflip still clears it
 const GLB_YAW = -Math.PI / 2;           // both scans point their nose to -x; turn them to face -z
 const SUV_L = 4.8;
 const TINTS = new Map([['silver', 0xb9bdc3], ['graphite', 0x62666e], ['black', 0x2b2c30], ['slate', 0x939cab]]);
@@ -444,15 +446,18 @@ function buildGlbCar(paint, opts) {
   root.add(blob);
   return { root, tilt, model, wheels: [], blinkers: [], h: proto.h, isSuv: proto === suvProto };
 }
-function makeProto(gltf, name, length) {
+// scale a scan either to a length along z (cars) or to a height (the truck, so a kickflip can clear it)
+function makeProto(gltf, name, length, { yaw = GLB_YAW, height: fitH = 0 } = {}) {
   let src = null;
   gltf.scene.traverse(o => { if (o.isMesh && !src) src = o; });
   if (!src) return null;
   const geo = src.geometry.clone();
-  geo.rotateY(GLB_YAW);
+  geo.rotateY(yaw);
   geo.computeBoundingBox();
-  const bb = geo.boundingBox, k = length / (bb.max.z - bb.min.z);
-  const height = (bb.max.y - bb.min.y) * k;   // read now: translate/scale below rewrite the box in place
+  const bb = geo.boundingBox;
+  const k = fitH ? fitH / (bb.max.y - bb.min.y) : length / (bb.max.z - bb.min.z);
+  // read now: translate/scale below rewrite the box in place
+  const height = (bb.max.y - bb.min.y) * k, sizeX = (bb.max.x - bb.min.x) * k, sizeZ = (bb.max.z - bb.min.z) * k;
   geo.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
   geo.scale(k, k, k);
   shared(geo);
@@ -462,7 +467,7 @@ function makeProto(gltf, name, length) {
   mat.envMapIntensity = 0.85;
   mat.needsUpdate = true;
   shared(mat);
-  return { name, geo, mat, h: height };
+  return { name, geo, mat, h: height, sizeX, sizeZ };
 }
 function useCar(gltf) {
   carProto = makeProto(gltf, 'sedan', CAR_L);
@@ -475,6 +480,11 @@ function useCar(gltf) {
   car.wheels.length = 0;
 }
 function useSuv(gltf) { suvProto = makeProto(gltf, 'suv', SUV_L); }
+// the scan already lies along x, which is exactly how it parks: broadside across the lane
+function useTruck(gltf) {
+  truckProto = makeProto(gltf, 'truck', 0, { yaw: 0, height: TRUCK_H });
+  if (truckProto) truckProto.mat.color.setHex(0xd9dee6);   // a faint cool tint so the white box separates from the floor
+}
 function loadModel(src, key, onModel, next) {
   const s = document.createElement('script');
   s.src = src; s.async = true;
@@ -497,7 +507,8 @@ function loadModel(src, key, onModel, next) {
 function loadGlb() {
   if (!THREE.GLTFLoader) return;
   // the player's car first; the SUV follows once it is in
-  loadModel('car.js', 'CAR_GLB_B64', useCar, () => loadModel('suv.js', 'SUV_GLB_B64', useSuv));
+  loadModel('car.js', 'CAR_GLB_B64', useCar, () => loadModel('suv.js', 'SUV_GLB_B64', useSuv,
+    () => loadModel('truck.js', 'TRUCK_GLB_B64', useTruck)));
 }
 
 const car = buildCar(paints.pearl);
@@ -748,6 +759,13 @@ function spawnObstacle(kind, z) {
       o.suv.root.rotation.y = o.side * Math.PI / 2 + o.side * 0.2 * e;
       o.suv.wheels.forEach(w => { w.spin.rotation.x -= (1 - e) * 0.4; });
     };
+  } else if (kind === 'trailer' && truckProto) {
+    const t = new THREE.Mesh(truckProto.geo, truckProto.mat);
+    t.castShadow = true; t.receiveShadow = true;
+    if (Math.random() < 0.5) t.rotation.y = Math.PI;      // cab on either side
+    root.add(t);
+    for (let i = -2; i <= 2; i++) root.add(cone(i * 1.9, -(truckProto.sizeZ / 2 + 1.6)));
+    o.h = truckProto.h + 0.02; o.hd = truckProto.sizeZ / 2 + 0.1;
   } else if (kind === 'trailer') {
     const body = box(11, 1.95, 2.5, trailerMat); body.position.y = 1.62;
     const deck = box(11, 0.18, 2.4, trimMat); deck.position.y = 0.66;
@@ -860,7 +878,7 @@ function crash(o) {
   for (let i = 0; i < 30; i++) emit(rand(-1.2, 1.2), rand(0.3, 1.4), rand(-2.6, -1.8), rand(-3, 3), rand(0.5, 2.5), rand(-2, 1), rand(0.9, 1.6), 0.8, 2.2, 0.65, 1.2, rand(0.85, 0.95), 0.4, 0);
   const isBest = dist > best;
   if (isBest) { best = dist; try { localStorage.setItem('roadster-best', String(Math.floor(best))); } catch (e) {} }
-  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · TRAILER' };
+  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · CONTAINER TRUCK' };
   overShownAt = 0;
   clearTimeout(overTimer);
   overTimer = setTimeout(() => {
