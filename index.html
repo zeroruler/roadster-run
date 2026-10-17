@@ -660,17 +660,36 @@ function spawnObstacle(kind, z) {
   const root = new THREE.Group();
   const o = { kind, root, z, x: 0, hw: 6, hd: 1, h: 1.5, t: 0, blinkers: [], smoke: null, update: null };
   if (kind === 'tires') {
-    const H = pick([3, 3, 4]);
-    for (let x = -4.0; x <= 4.01; x += 1.0) {
-      const n = Math.abs(x) < 1.8 ? H : Math.max(1, H - (Math.random() < 0.5 ? 1 : 0) - (Math.abs(x) > 3.2 ? 1 : 0));
-      const zo = rand(-0.1, 0.1);
-      for (let i = 0; i < n; i++) {
-        const t = new THREE.Mesh(torusGeo, (i === n - 1 && Math.random() < 0.3) ? rubberWhite : rubber);
-        t.position.set(x + rand(-0.05, 0.05), 0.19 + i * 0.38, zo);
-        t.castShadow = true; t.receiveShadow = true; root.add(t);
+    // an oval pile, tallest in the middle, two or three staggered rows deep
+    const H = pick([3, 3, 4]), rows = pick([2, 3, 3]);
+    const A = 4.3, B = rows === 3 ? 1.45 : 0.95, ROW = 1.0;
+    const spots = [];
+    let centerH = 0;
+    for (let r = 0; r < rows; r++) {
+      const z = (r - (rows - 1) / 2) * ROW;
+      const off = r % 2 ? 0.52 : 0;                       // stagger rows so tires nest
+      for (let x = -A + off; x <= A + 0.01; x += 1.04) {
+        const e = (x / A) ** 2 + (z / B) ** 2;
+        if (e > 1) continue;
+        const n = Math.max(1, Math.round(H * (1 - 0.6 * e) + rand(-0.4, 0.3)));
+        spots.push([x + rand(-0.06, 0.06), z + rand(-0.08, 0.08), n]);
+        if (Math.abs(x) < 1.6) centerH = Math.max(centerH, n);
       }
     }
-    o.h = H * 0.38 + 0.02; o.hd = 0.55;
+    // one instanced draw per rubber colour instead of a mesh per tire
+    const total = spots.reduce((t, sp) => t + sp[2], 0);
+    const black = new THREE.InstancedMesh(torusGeo, rubber, total), white = new THREE.InstancedMesh(torusGeo, rubberWhite, total);
+    const mtx = new THREE.Matrix4(), q = new THREE.Quaternion(), one = new THREE.Vector3(1, 1, 1), pos = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
+    let nb = 0, nw = 0;
+    for (const [x, z, n] of spots) for (let i = 0; i < n; i++) {
+      q.setFromAxisAngle(up, Math.random() * 6.283);
+      mtx.compose(pos.set(x + rand(-0.04, 0.04), 0.19 + i * 0.38, z), q, one);
+      if (i === n - 1 && Math.random() < 0.3) white.setMatrixAt(nw++, mtx); else black.setMatrixAt(nb++, mtx);
+    }
+    black.count = nb; white.count = nw;
+    for (const m of [black, white]) { m.castShadow = true; m.receiveShadow = true; m.instanceMatrix.needsUpdate = true; root.add(m); }
+    o.h = centerH * 0.38 + 0.02;
+    o.hd = ((rows - 1) / 2) * ROW + 0.55;
   } else if (kind === 'crash') {
     const side = Math.random() < 0.5 ? -1 : 1;
     const c1 = buildCar(pick([paints.silver, paints.graphite, paints.slate]), { suv: Math.random() < 0.4 });
@@ -715,6 +734,7 @@ function spawnObstacle(kind, z) {
 function removeObstacle(o) {
   scene.remove(o.root);
   o.root.traverse(m => {
+    if (m.isInstancedMesh && m.dispose) m.dispose();
     if (m.geometry && !m.geometry.userData.shared) m.geometry.dispose();
     if (m.material && !m.material.userData.shared) m.material.dispose();
   });
