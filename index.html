@@ -549,8 +549,10 @@ function updateParticles(dt, dz) {
     // hitting the floor: the jet splashes outward and rolls along the ground
     if (pGnd[i] && pPos[j + 1] < 0.18 && pVel[j + 1] < 0) {
       const sp = -pVel[j + 1] * 0.32, ang = Math.random() * 6.283;
-      pPos[j + 1] = 0.18; pVel[j + 1] = rand(0.2, 0.9); pGrow[i] = rand(2.2, 3.2); pSoft[i] = 0.5;
-      pLife[i] += 0.7; pMax[i] += 0.7;
+      pPos[j + 1] = 0.18; pVel[j + 1] = rand(0.2, 0.7); pSoft[i] = 0.5;
+      // only some of the jet lingers as a ground cloud; the rest just fades where it lands
+      if (Math.random() < 0.4) { pGrow[i] = rand(1.7, 2.4); pA0[i] *= 0.7; pLife[i] += 0.4; pMax[i] += 0.4; }
+      else { pGrow[i] = rand(1.0, 1.4); pA0[i] *= 0.5; }
       pVel[j] += Math.cos(ang) * sp; pVel[j + 2] += Math.sin(ang) * sp * 0.8;
     }
     const age = pMax[i] - pLife[i], f = pLife[i] / pMax[i];
@@ -762,12 +764,15 @@ function jump() {
 }
 function crash(o) {
   state = 'over'; shake = 0.5; sfx.crash(); buzz([40, 30, 60]);
+  const contactZ = -(o.hd + CAR_L / 2 + 0.05);
+  if (o.z > contactZ) { const push = contactZ - o.z; obstacles.forEach(ob => { ob.z += push; }); }
+  worldSpeed = -Math.min(9, speed * 0.25);   // recoil: the world moves away for a moment
   vy = 7; airborne = true; spinV = rand(-5, 5) || 3;
   for (let i = 0; i < 40; i++) {
     const a = Math.random() * Math.PI * 2, s = rand(3, 12);
     emit(rand(-0.8, 0.8), rand(0.4, 1.3), -2, Math.cos(a) * s, rand(2, 10), Math.sin(a) * s - 4, rand(0.4, 0.9), 0.14, 0.05, 1, 1.5, rand(0.2, 0.45), -14, 0);
   }
-  for (let i = 0; i < 60; i++) emit(rand(-1.2, 1.2), rand(0.3, 1.4), rand(-2.2, -0.8), rand(-3, 3), rand(0.5, 2.5), rand(-2, 1), rand(1.2, 2.4), 0.8, 2.6, 0.8, 1.2, rand(0.85, 0.95), 0.4, 0);
+  for (let i = 0; i < 30; i++) emit(rand(-1.2, 1.2), rand(0.3, 1.4), rand(-2.6, -1.8), rand(-3, 3), rand(0.5, 2.5), rand(-2, 1), rand(0.9, 1.6), 0.8, 2.2, 0.65, 1.2, rand(0.85, 0.95), 0.4, 0);
   const isBest = dist > best;
   if (isBest) { best = dist; try { localStorage.setItem('roadster-best', String(Math.floor(best))); } catch (e) {} }
   const reasons = { tires: '충돌 · 타이어 더미', crash: '충돌 · 사고 차량', villain: '충돌 · 빌런 SUV', trailer: '충돌 · 트레일러' };
@@ -829,7 +834,7 @@ function tick(now) {
     speed = Math.min(MAX_SPEED, speed + ACCEL * dt);
     worldSpeed = speed; dist += speed * dt;
   } else if (state === 'over') {
-    worldSpeed *= Math.exp(-14 * dt);
+    worldSpeed *= Math.exp(-4 * dt);
   } else {
     worldSpeed = 0;
     car.root.rotation.y = IDLE_YAW + Math.sin(clock * 0.35) * 0.06;
@@ -879,7 +884,7 @@ function tick(now) {
   // launch burst, then a steady hold for as long as the car is airborne with its wheels facing the floor
   const upright = Math.cos(car.tilt.rotation.z) > 0.8;
   if (jumpJetT > 0) { jumpJetT -= dt; jumpJets(Math.ceil(dt * 300), y, dt); }
-  else if (airborne && state === 'run' && upright && y > 0.15) jumpJets(Math.floor(dt * 170 + Math.random()), y, dt);
+  else if (airborne && state === 'run' && upright && y > 0.15) jumpJets(Math.floor(dt * 120 + Math.random()), y, dt);
   if (flipJetT > 0) { flipJetT -= dt; flipJets(Math.ceil(dt * 480), y, dt); }
 
   roadTex.offset.y = (roadTex.offset.y + dz / TILE) % 1;
