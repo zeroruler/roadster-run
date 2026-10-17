@@ -483,6 +483,7 @@ function useSuv(gltf) { suvProto = makeProto(gltf, 'suv', SUV_L); }
 // the scan already lies along x, which is exactly how it parks: broadside across the lane
 // steel coil: the scan is squashed and short, so it is made round and stretched 1.6x along its axis,
 // then turned so it rolls along the road (axis across the lane)
+const COIL_CROSS = 9;                   // truck crossing speed, m/s
 const COIL_R = 1.35, COIL_STRETCH = 2.2, COIL_DROP_Z = -90;   // where the coil leaves the truck: close enough to read clearly
 const coilMat = shared(new THREE.MeshStandardMaterial({ color: 0xa7b0ba, metalness: 0.85, roughness: 0.32 }));
 let coilGeo = (() => { const g = new THREE.CylinderGeometry(COIL_R, COIL_R, 2.1, 32); g.rotateZ(Math.PI / 2); return shared(g); })();
@@ -506,7 +507,7 @@ function useCoil(gltf) {
 // flatbed coil carrier: an untextured scan, cab at -x, flat bed over the rear two thirds
 let flatbedProto = null;
 const FLATBED_L = 13.5;                 // long enough for three big coils nose to tail
-const flatbedMat = shared(new THREE.MeshStandardMaterial({ color: 0x7d9585, roughness: 0.55, metalness: 0.25 }));
+const flatbedMat = shared(new THREE.MeshStandardMaterial({ color: 0xd9dee6, roughness: 0.5, metalness: 0.2 }));   // same tone as the container truck
 function useFlatbed(gltf) {
   let src = null;
   gltf.scene.traverse(o => { if (o.isMesh && !src) src = o; });
@@ -765,15 +766,37 @@ function spawnObstacle(kind, z) {
     const black = new THREE.InstancedMesh(torusGeo, rubber, total), white = new THREE.InstancedMesh(torusGeo, rubberWhite, total);
     const mtx = new THREE.Matrix4(), q = new THREE.Quaternion(), one = new THREE.Vector3(1, 1, 1), pos = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
     let nb = 0, nw = 0;
+    const tireList = [];
     for (const [x, z, n] of spots) for (let i = 0; i < n; i++) {
-      q.setFromAxisAngle(up, Math.random() * 6.283);
-      mtx.compose(pos.set(x + rand(-0.04, 0.04), 0.19 + i * 0.38, z), q, one);
-      if (i === n - 1 && Math.random() < 0.3) white.setMatrixAt(nw++, mtx); else black.setMatrixAt(nb++, mtx);
+      const ry = Math.random() * 6.283, px = x + rand(-0.04, 0.04), py = 0.19 + i * 0.38;
+      q.setFromAxisAngle(up, ry);
+      mtx.compose(pos.set(px, py, z), q, one);
+      const m = (i === n - 1 && Math.random() < 0.3) ? white : black, idx = m === white ? nw++ : nb++;
+      m.setMatrixAt(idx, mtx);
+      tireList.push({ m, idx, p: new THREE.Vector3(px, py, z), r: new THREE.Euler(0, ry, 0), v: new THREE.Vector3(), w: new THREE.Vector3() });
     }
     black.count = nb; white.count = nw;
     for (const m of [black, white]) { m.castShadow = true; m.receiveShadow = true; m.instanceMatrix.needsUpdate = true; root.add(m); }
     o.h = centerH * 0.38 + 0.02;
     o.hd = zMax + 0.55;
+    // on impact the pile bursts: each tire flies forward and out, tumbling, then bounces to rest
+    o.scatter = carSpeed => {
+      for (const t of tireList) {
+        const side = Math.sign(t.p.x) || (Math.random() < 0.5 ? -1 : 1);
+        t.v.set(side * rand(1.5, 5) + t.p.x * 0.6, rand(3, 8) + t.p.y * 2, -carSpeed * rand(0.35, 0.7));
+        t.w.set(rand(-9, 9), rand(-4, 4), rand(-9, 9));
+      }
+      const q2 = new THREE.Quaternion();
+      o.update = dt => {
+        for (const t of tireList) {
+          t.v.y -= 22 * dt; t.p.addScaledVector(t.v, dt);
+          if (t.p.y < 0.2) { t.p.y = 0.2; t.v.y = Math.abs(t.v.y) * 0.32; t.v.x *= 0.75; t.v.z *= 0.75; t.w.multiplyScalar(0.7); }
+          t.r.x += t.w.x * dt; t.r.y += t.w.y * dt; t.r.z += t.w.z * dt;
+          mtx.compose(t.p, q2.setFromEuler(t.r), one); t.m.setMatrixAt(t.idx, mtx);
+        }
+        black.instanceMatrix.needsUpdate = true; white.instanceMatrix.needsUpdate = true;
+      };
+    };
     o.hw = xMax + 0.6;
   } else if (kind === 'crash') {
     const side = Math.random() < 0.5 ? -1 : 1;
@@ -836,8 +859,8 @@ function spawnObstacle(kind, z) {
     o.x = 0; o.hw = COIL_W / 2; o.hd = COIL_R; o.h = 0; o.rollV = 0; o.st = st;
     o.update = dt => {
       // the crossing is timed to the road, so the tail passes over the lane exactly at COIL_DROP_Z
-      if (st.phase === 'ride') st.tx = -tail + d * 15 * (o.z - COIL_DROP_Z) / Math.max(speed, 10);
-      else st.tx += d * 15 * dt;
+      if (st.phase === 'ride') st.tx = -tail + d * COIL_CROSS * (o.z - COIL_DROP_Z) / Math.max(speed, 10);
+      else st.tx += d * COIL_CROSS * dt;
       st.tz -= st.roll * dt;                 // the truck stays put on the road while the root follows the coil
       rig.position.set(st.tx, 0, st.tz);
       if (st.phase === 'ride') {
@@ -855,8 +878,10 @@ function spawnObstacle(kind, z) {
           }
         }
         // rolls toward the car a quarter faster than the road, capped, so its timing reads differently
-        if (st.cy <= COIL_R + 0.25) st.roll += (Math.min(12, speed * 0.25) - st.roll) * Math.min(1, dt * 3);
+        if (state === 'over') st.roll *= Math.exp(-2.2 * dt);
+        else if (st.cy <= COIL_R + 0.25) st.roll += (Math.min(12, speed * 0.25) - st.roll) * Math.min(1, dt * 3);
         o.z += st.roll * dt;
+        if (state === 'over') o.z = Math.min(o.z, -(o.hd + CAR_L / 2 + 0.05));
         st.spin += st.roll / COIL_R * dt;
         coil.position.set(st.cx, st.cy, 0);
         coil.rotation.x = st.spin;
@@ -927,13 +952,13 @@ const camPos = new THREE.Vector3(), camLook = new THREE.Vector3();
 let state = 'idle', introT = 0;
 let speed = 0, worldSpeed = 0, dist = 0, sinceSpawn = 0, gap = 50, lastKind = '';
 let y = 0, vy = 0, airborne = false, flipLeft = 0, flipT = 0, flipDir = 1;
-let shake = 0, fovKick = 0, spinV = 0, overShownAt = 0, overTimer = 0, liftT = 0, flipLiftT = 0, flipTargetV = 0, camY = 0;
+let shake = 0, fovKick = 0, spinV = 0, pitchV = 0, crashDecay = 4, braking = false, overShownAt = 0, overTimer = 0, liftT = 0, flipLiftT = 0, flipTargetV = 0, camY = 0;
 car.root.rotation.y = IDLE_YAW;
 
 function resetRun() {
   obstacles.splice(0).forEach(removeObstacle);
   speed = START_SPEED; worldSpeed = speed; dist = 0; sinceSpawn = 0; gap = 60; lastKind = '';
-  y = 0; vy = 0; airborne = false; flipLeft = 0; flipT = 0; spinV = 0; jumpJetT = 0; flipJetT = 0; liftT = 0; flipLiftT = 0; camY = 0;
+  y = 0; vy = 0; airborne = false; flipLeft = 0; flipT = 0; spinV = 0; pitchV = 0; braking = false; crashDecay = 4; jumpJetT = 0; flipJetT = 0; liftT = 0; flipLiftT = 0; camY = 0;
   car.root.rotation.set(0, 0, 0); car.tilt.rotation.set(0, 0, 0);
   elThr.classList.remove('spent');
 }
@@ -976,10 +1001,24 @@ function jump() {
 }
 function crash(o) {
   state = 'over'; shake = 0.5; sfx.crash(); buzz([40, 30, 60]);
+  liftT = 0; flipLiftT = 0; pitchV = 0; braking = false;
   const contactZ = -(o.hd + CAR_L / 2 + 0.05);
-  if (o.z > contactZ) { const push = contactZ - o.z; obstacles.forEach(ob => { ob.z += push; }); }
-  worldSpeed = -Math.min(9, speed * 0.25);   // recoil: the world moves away for a moment
-  vy = 7; liftT = 0; flipLiftT = 0; airborne = true; spinV = rand(-5, 5) || 3;
+  if (o.kind === 'tires' && o.scatter) {
+    // tires give way: the pile bursts and the car brakes to a stop through the gap
+    o.scatter(speed);
+    worldSpeed = speed * 0.85; crashDecay = 2.6; braking = true;
+    vy = Math.min(vy, 0); airborne = y > 0.02; spinV = 0; shake = 0.25;
+  } else {
+    if (o.z > contactZ) { const push = contactZ - o.z; obstacles.forEach(ob => { ob.z += push; }); }
+    if (o.kind === 'coil') {
+      // a rolling ten-tonne coil doesn't stop for a car: the car is thrown back and over
+      worldSpeed = -Math.min(24, speed * 0.55); crashDecay = 1.7;
+      vy = 9.5; airborne = true; spinV = rand(-1.2, 1.2); pitchV = 5.2; shake = 0.7;
+    } else {
+      worldSpeed = -Math.min(9, speed * 0.25); crashDecay = 4;   // recoil: the world moves away for a moment
+      vy = 7; airborne = true; spinV = rand(-5, 5) || 3;
+    }
+  }
   for (let i = 0; i < 40; i++) {
     const a = Math.random() * Math.PI * 2, s = rand(3, 12);
     emit(rand(-0.8, 0.8), rand(0.4, 1.3), -2, Math.cos(a) * s, rand(2, 10), Math.sin(a) * s - 4, rand(0.4, 0.9), 0.14, 0.05, 1, 1.5, rand(0.2, 0.45), -14, 0);
@@ -1062,7 +1101,7 @@ function tick(now) {
     speed = Math.min(MAX_SPEED, speed + ACCEL * dt);
     worldSpeed = speed; dist += speed * dt;
   } else if (state === 'over') {
-    worldSpeed *= Math.exp(-4 * dt);
+    worldSpeed *= Math.exp(-crashDecay * dt);
   } else {
     worldSpeed = 0;
     car.root.rotation.y = IDLE_YAW + Math.sin(clock * 0.35) * 0.06;
@@ -1106,6 +1145,8 @@ function tick(now) {
   contact.position.y = 0.006 - y;
   if (state === 'over') {
     car.tilt.rotation.y += spinV * dt; car.tilt.rotation.z += spinV * 0.3 * dt; spinV *= Math.exp(-1.5 * dt);
+    car.tilt.rotation.x += pitchV * dt; pitchV *= Math.exp(-1.1 * dt);                      // thrown back nose-up
+    if (braking) car.tilt.rotation.x += (-0.07 * Math.min(1, worldSpeed / 8) - car.tilt.rotation.x) * Math.min(1, dt * 8);   // nose dips under braking
   } else if (state === 'run') {
     const sway = airborne ? 0.025 * Math.sin(clock * 8.5) * Math.min(1, y) : 0;   // slight wobble on the jets
     car.tilt.rotation.z = flipT > 0 ? fe * Math.PI * 2 * flipDir : sway;
