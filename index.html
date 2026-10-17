@@ -483,10 +483,10 @@ function useSuv(gltf) { suvProto = makeProto(gltf, 'suv', SUV_L); }
 // the scan already lies along x, which is exactly how it parks: broadside across the lane
 // steel coil: the scan is squashed and short, so it is made round and stretched 1.6x along its axis,
 // then turned so it rolls along the road (axis across the lane)
-const COIL_R = 0.9, COIL_STRETCH = 2.2, COIL_DROP_Z = -90;   // where the coil leaves the truck: close enough to read clearly
+const COIL_R = 1.35, COIL_STRETCH = 2.2, COIL_DROP_Z = -90;   // where the coil leaves the truck: close enough to read clearly
 const coilMat = shared(new THREE.MeshStandardMaterial({ color: 0xa7b0ba, metalness: 0.85, roughness: 0.32 }));
-let coilGeo = (() => { const g = new THREE.CylinderGeometry(COIL_R, COIL_R, 1.4, 32); g.rotateZ(Math.PI / 2); return shared(g); })();
-let COIL_W = 1.4;
+let coilGeo = (() => { const g = new THREE.CylinderGeometry(COIL_R, COIL_R, 2.1, 32); g.rotateZ(Math.PI / 2); return shared(g); })();
+let COIL_W = 2.1;
 function useCoil(gltf) {
   let src = null;
   gltf.scene.traverse(o => { if (o.isMesh && !src) src = o; });
@@ -505,7 +505,7 @@ function useCoil(gltf) {
 }
 // flatbed coil carrier: an untextured scan, cab at -x, flat bed over the rear two thirds
 let flatbedProto = null;
-const FLATBED_L = 12;
+const FLATBED_L = 13.5;                 // long enough for three big coils nose to tail
 const flatbedMat = shared(new THREE.MeshStandardMaterial({ color: 0x7d9585, roughness: 0.55, metalness: 0.25 }));
 function useFlatbed(gltf) {
   let src = null;
@@ -813,11 +813,11 @@ function spawnObstacle(kind, z) {
       if (flip < 0) truck.rotation.y = Math.PI;
       rig.add(truck);
       top = flatbedProto.bedTop;
-      // three coils along the deck, eyes fore and aft; the rearmost one is the one that comes loose
-      const a = flatbedProto.bedFrom + COIL_W / 2 + 0.4, b = flatbedProto.bedTo - COIL_W / 2 - 0.3;
-      for (let i = 0; i < 2; i++) {
+      // three coils packed end to end along the deck, eyes fore and aft; the rearmost one comes loose
+      const b = flatbedProto.bedTo - COIL_W / 2 - 0.1;
+      for (let i = 1; i <= 2; i++) {
         const c = new THREE.Mesh(coilGeo, coilMat); c.castShadow = true;
-        c.position.set(flip * (a + (b - a) * i / 2), top + COIL_R, 0); rig.add(c);
+        c.position.set(flip * (b - COIL_W * i), top + COIL_R, 0); rig.add(c);
       }
       tail = flip * b;
     } else {
