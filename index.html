@@ -415,7 +415,7 @@ function buildCar(paint, opts = {}) {
 let carProto = null;                    // Model 3 scan: the player and most obstacle cars
 let suvProto = null;                    // Sorento scan: the villain and some wrecks
 let truckProto = null;                  // container truck scan: parked across the road, kickflip only
-const TRUCK_H = 2.65;                   // scaled to this height so a kickflip still clears it
+const TRUCK_H = 3.2;                    // above a plain jump's 2.9 m peak; a kickflip still clears it
 const GLB_YAW = -Math.PI / 2;           // both scans point their nose to -x; turn them to face -z
 const SUV_L = 4.8;
 const TINTS = new Map([['silver', 0xb9bdc3], ['graphite', 0x62666e], ['black', 0x2b2c30], ['slate', 0x939cab]]);
@@ -835,7 +835,9 @@ function resetRun() {
 function chooseKind() {
   const w = [['tires', 3], ['crash', 3]];
   if (dist > 140) w.push(['villain', 2.4]);
-  if (dist > 520 && lastKind !== 'trailer') w.push(['trailer', 1.3]);
+  // the truck turns up more as the run speeds up: ~13% of picks at 135 km/h, capped near 35% from ~234 km/h,
+  // and never twice in a row
+  if (dist > 520 && lastKind !== 'trailer') w.push(['trailer', 1.3 + 3.3 * smooth(30, 52, speed)]);
   let r = Math.random() * w.reduce((s, [, v]) => s + v, 0);
   for (const [k, v] of w) if ((r -= v) <= 0) return k;
   return 'tires';
