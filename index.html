@@ -661,20 +661,34 @@ function spawnObstacle(kind, z) {
   const o = { kind, root, z, x: 0, hw: 6, hd: 1, h: 1.5, t: 0, blinkers: [], smoke: null, update: null };
   if (kind === 'tires') {
     // an oval pile, tallest in the middle, two or three staggered rows deep
-    const H = pick([3, 3, 4]), rows = pick([2, 3, 3]);
-    const A = 4.3, B = rows === 3 ? 1.45 : 0.95, ROW = 1.0;
-    const spots = [];
-    let centerH = 0;
-    for (let r = 0; r < rows; r++) {
-      const z = (r - (rows - 1) / 2) * ROW;
-      const off = r % 2 ? 0.52 : 0;                       // stagger rows so tires nest
-      for (let x = -A + off; x <= A + 0.01; x += 1.04) {
-        const e = (x / A) ** 2 + (z / B) ** 2;
-        if (e > 1) continue;
-        const n = Math.max(1, Math.round(H * (1 - 0.6 * e) + rand(-0.4, 0.3)));
-        spots.push([x + rand(-0.06, 0.06), z + rand(-0.08, 0.08), n]);
-        if (Math.abs(x) < 1.6) centerH = Math.max(centerH, n);
+    let spots = [];
+    if (Math.random() < 0.35) {
+      // a small pile, under ten tires, still at least two high in the middle so it has to be jumped
+      spots = pick([
+        [[-1.04, 0, 2], [0, 0, 3], [1.04, 0, 2]],
+        [[-0.52, -0.5, 2], [0.52, -0.5, 2], [0, 0.5, 3]],
+        [[-0.52, -0.5, 2], [0.52, -0.5, 2], [-0.52, 0.5, 2], [0.52, 0.5, 2]],
+        [[-1.04, 0, 1], [0, 0, 3], [1.04, 0, 1], [0, 0.95, 2]],
+        [[-0.52, 0, 3], [0.52, 0, 3], [0, 0.95, 2]],
+      ]).map(([x, z, n]) => [x + rand(-0.05, 0.05), z + rand(-0.06, 0.06), n]);
+    } else {
+      const H = pick([3, 3, 4]), rows = pick([2, 3, 3]);
+      const A = 4.3, B = rows === 3 ? 1.45 : 0.95, ROW = 1.0;
+      for (let r = 0; r < rows; r++) {
+        const z = (r - (rows - 1) / 2) * ROW;
+        const off = r % 2 ? 0.52 : 0;                     // stagger rows so tires nest
+        for (let x = -A + off; x <= A + 0.01; x += 1.04) {
+          const e = (x / A) ** 2 + (z / B) ** 2;
+          if (e > 1) continue;
+          const n = Math.max(1, Math.round(H * (1 - 0.6 * e) + rand(-0.4, 0.3)));
+          spots.push([x + rand(-0.06, 0.06), z + rand(-0.08, 0.08), n]);
+        }
       }
+    }
+    let centerH = 0, zMax = 0, xMax = 0;
+    for (const [x, z, n] of spots) {
+      if (Math.abs(x) < 1.6) centerH = Math.max(centerH, n);
+      zMax = Math.max(zMax, Math.abs(z)); xMax = Math.max(xMax, Math.abs(x));
     }
     // one instanced draw per rubber colour instead of a mesh per tire
     const total = spots.reduce((t, sp) => t + sp[2], 0);
@@ -689,7 +703,8 @@ function spawnObstacle(kind, z) {
     black.count = nb; white.count = nw;
     for (const m of [black, white]) { m.castShadow = true; m.receiveShadow = true; m.instanceMatrix.needsUpdate = true; root.add(m); }
     o.h = centerH * 0.38 + 0.02;
-    o.hd = ((rows - 1) / 2) * ROW + 0.55;
+    o.hd = zMax + 0.55;
+    o.hw = xMax + 0.6;
   } else if (kind === 'crash') {
     const side = Math.random() < 0.5 ? -1 : 1;
     const c1 = buildCar(pick([paints.silver, paints.graphite, paints.slate]), { suv: Math.random() < 0.4 });
