@@ -66,7 +66,7 @@ h1 { font-family: var(--display); font-weight: 400; margin: 0; font-size: clamp(
 kbd { font-family: var(--display); font-size: 9px; letter-spacing: 0.1em; padding: 3px 6px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink); background: var(--paper); }
 .btn {
   align-self: flex-start; cursor: pointer; min-height: 48px;
-  font-family: var(--body); font-weight: 700; font-size: 14px; letter-spacing: 0.04em;
+  font-family: var(--display); font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase;
   color: var(--paper); background: var(--ink); border: 0; border-radius: 4px;
   padding: 14px 30px; transition: background 0.15s, transform 0.1s; touch-action: manipulation;
 }
@@ -74,7 +74,7 @@ kbd { font-family: var(--display); font-size: 9px; letter-spacing: 0.1em; paddin
 .btn:active { transform: translateY(1px); }
 .btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .stats { display: flex; gap: 32px; }
-.newbest { font-size: 12px; font-weight: 700; color: var(--signal); }
+.newbest { font-family: var(--display); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--signal); }
 .hint {
   position: fixed; left: 0; right: 0; bottom: 0; text-align: center;
   padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
@@ -106,32 +106,32 @@ kbd { font-family: var(--display); font-size: 9px; letter-spacing: 0.1em; paddin
 </div>
 
 <div class="hint" id="hint" hidden>
-  <span class="only-key"><kbd>SPACE</kbd> 점프 · 공중에서 한 번 더 = 킥플립</span>
-  <span class="only-touch">탭 점프 · 공중에서 한 번 더 탭 = 킥플립</span>
+  <span class="only-key"><kbd>SPACE</kbd> Jump · press again in the air to kickflip</span>
+  <span class="only-touch">Tap to jump · tap again in the air to kickflip</span>
 </div>
 
 <div class="panel" id="startOv">
   <div class="panel-inner">
     <span class="eyebrow">2026 · <b>AIR</b> DEMO</span>
     <h1>ROADSTER RUN</h1>
-    <p>도로를 가로막은 사고 차량, 끼어든 빌런 SUV, 타이어 더미를 점프로 넘으세요. 공중에서 한 번 더 누르면 킥플립으로 더 높이, 더 오래 납니다.</p>
+    <p>Jump the crashed cars, the villain SUV cutting in and the tire stacks blocking the road. Press again in the air to kickflip higher and hang longer.</p>
     <div class="keys">
-      <span class="only-key"><kbd>SPACE</kbd> 점프</span><span class="only-key"><kbd>SPACE</kbd> ×2 킥플립</span>
-      <span class="only-touch">화면 탭 점프 · 공중에서 한 번 더 탭 킥플립</span>
+      <span class="only-key"><kbd>SPACE</kbd> Jump</span><span class="only-key"><kbd>SPACE</kbd> ×2 Kickflip</span>
+      <span class="only-touch">Tap to jump · tap again in the air to kickflip</span>
     </div>
-    <button class="btn" id="startBtn" type="button">출발</button>
+    <button class="btn" id="startBtn" type="button">Start</button>
   </div>
 </div>
 
 <div class="panel" id="overOv" hidden>
   <div class="panel-inner">
-    <span class="eyebrow ko" id="overReason">충돌</span>
+    <span class="eyebrow" id="overReason">CRASH</span>
     <div class="stats">
       <div class="gauge"><span class="label">Distance</span><span class="big" id="finalDist">0 m</span></div>
       <div class="gauge"><span class="label">Best</span><span class="big" id="finalBest">0 m</span></div>
     </div>
-    <span class="newbest" id="newBest" hidden>새 최고 기록</span>
-    <button class="btn" id="retryBtn" type="button">다시 달리기</button>
+    <span class="newbest" id="newBest" hidden>New best</span>
+    <button class="btn" id="retryBtn" type="button">Retry</button>
   </div>
 </div>
 
@@ -468,18 +468,25 @@ car.root.add(contact);
 
 // ---------- steam (one draw call for every puff) ----------
 const puffTex = (() => {
-  const N = 128, c = document.createElement('canvas'); c.width = c.height = N;
+  // value-noise fbm inside a warped soft mask, so no single puff reads as a circle
+  const N = 128, G = 16, c = document.createElement('canvas'); c.width = c.height = N;
   const g = c.getContext('2d'), img = g.createImageData(N, N);
-  const blobs = [[0, 0, .3], [-.15, -.09, .2], [.16, -.07, .19], [.04, .15, .2], [-.13, .13, .16], [.18, .12, .15], [0, -.18, .16]];
+  const grid = new Float32Array(G * G).map(() => Math.random());
+  const h = (i, j) => grid[((i % G + G) % G) * G + ((j % G + G) % G)];
+  const vn = (x, y) => {
+    const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    return lerp(lerp(h(xi, yi), h(xi + 1, yi), u), lerp(h(xi, yi + 1), h(xi + 1, yi + 1), u), v);
+  };
+  const fbm = (x, y) => { let s = 0, a = 0.5, f = 3; for (let k = 0; k < 5; k++) { s += a * vn(x * f, y * f); a *= 0.5; f *= 2; } return s / 0.97; };
   for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
-    const nx = x / N - 0.5, ny = y / N - 0.5;
-    let d = 0;
-    for (const [bx, by, br] of blobs) { const dx = nx - bx, dy = ny - by; d += Math.exp(-(dx * dx + dy * dy) / (br * br * 0.5)); }
-    const r = Math.hypot(nx, ny);
-    const a = clamp(d * 0.85, 0, 1) * (1 - smooth(0.36, 0.5, r));
-    const shade = clamp(0.62 - nx * 0.7 - ny * 1.1 + 0.25 * Math.min(d, 1), 0, 1);
+    const u = x / N, v = y / N, nx = u - 0.5, ny = v - 0.5;
+    const wx = nx + (fbm(u + 3.1, v) - 0.5) * 0.45, wy = ny + (fbm(u, v + 7.3) - 0.5) * 0.45;
+    const mask = Math.exp(-(wx * wx + wy * wy) / 0.05);
+    const n = fbm(u + 11.7, v + 5.2);
+    const a = clamp(mask * (0.25 + 1.5 * (n - 0.35)), 0, 1) * (1 - smooth(0.4, 0.5, Math.hypot(nx, ny)));
     const i = (y * N + x) * 4;
-    img.data[i] = img.data[i + 1] = img.data[i + 2] = shade * 255; img.data[i + 3] = a * 255;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = 255; img.data[i + 3] = a * 255;
   }
   g.putImageData(img, 0, 0);
   const t = new THREE.CanvasTexture(c); t.flipY = false; return t;
@@ -515,9 +522,8 @@ const pMat = new THREE.ShaderMaterial({
       float s = sin(vR), co = cos(vR);
       c = mat2(co, -s, s, co) * c;
       vec4 t = texture2D(map, c + 0.5);
-      // one flat tone, soft round falloff; overlapping puffs melt into a single smooth plume
-      float core = 1.0 - smoothstep(0.0, 0.5, length(c));
-      float a = core * core * vA * mix(0.75, 1.0, vS);
+      // one flat tone; the wispy texture carries the shape, so overlaps read as smoke, not dots
+      float a = t.a * vA * mix(0.85, 1.0, vS);
       if (a < 0.01) discard;
       vec3 col = vec3(0.91, 0.92, 0.935) * vT;
       gl_FragColor = vec4(col, a);
@@ -569,7 +575,7 @@ function updatePointScale() {
 }
 
 // Jets follow the demo footage: thin straight plumes that move with the car instead of trailing behind it.
-let jumpJetT = 0, flipJetT = 0, flipSide = 1;
+let jumpJetT = 0, flipSide = 1;
 const WHEEL_POS = [[-WHEEL_X, WHEEL_Z[0]], [WHEEL_X, WHEEL_Z[0]], [-WHEEL_X, WHEEL_Z[1]], [WHEEL_X, WHEEL_Z[1]]];
 // spread each puff along the stretch it would have covered this frame, so a fast jet reads as one unbroken streak
 function jetPuff(x, y, z, dx, dy, dz, sp, dt, spread, size, grow, life, drag = 0.9, fade = 0.7) {
@@ -586,15 +592,51 @@ function jumpJets(n, y, dt) {
       rand(0.22, 0.3), rand(0.65, 0.9), rand(0.45, 0.7));
   }
 }
-// kickflip: two horizontal plumes from one flank, front and rear, splayed into a V.
-// They hold their direction while the body rolls, so the spray never gets flung around.
-function flipJets(n, y, dt) {
-  const s = flipSide;
-  for (const [pz, dzz] of [[-1.15, -0.32], [1.15, 0.32]]) for (let i = 0; i < n; i++) {
-    // same puff size, spread and growth as the vertical jets so both read as one kind of plume
-    jetPuff(s * 1.0, y + 0.7, pz, s, 0.04, dzz, rand(24, 29), dt, 0.28,
-      rand(0.22, 0.3), rand(0.65, 0.9), rand(0.32, 0.42), 7.5, 2.2);
-  }
+// kickflip: two straight rods of steam fixed to one flank, front and rear. They are part of the
+// car rig, so they roll with the body like thrusters bolted to its side.
+const rodGeo = new THREE.CylinderGeometry(0.42, 0.12, 3.0, 18, 1, true);
+rodGeo.translate(0, 1.5, 0); rodGeo.rotateZ(-Math.PI / 2);     // nozzle at the origin, plume along +x
+const rodMat = new THREE.ShaderMaterial({
+  uniforms: { uA: { value: 0 }, uT: { value: 0 } },
+  vertexShader: `
+    varying float vV; varying vec3 vN; varying vec3 vP;
+    void main() {
+      vV = uv.y;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vP = mv.xyz; vN = normalMatrix * normal;
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    uniform float uA; uniform float uT; varying float vV; varying vec3 vN; varying vec3 vP;
+    void main() {
+      float facing = abs(dot(normalize(vN), normalize(-vP)));          // soft round edge, dense core
+      float along = smoothstep(0.0, 0.05, vV) * pow(1.0 - vV, 0.9);    // solid at the nozzle, dissolving at the tip
+      float flick = 0.86 + 0.14 * sin(vV * 26.0 - uT * 60.0);
+      float a = uA * along * pow(facing, 0.9) * flick;
+      if (a < 0.01) discard;
+      gl_FragColor = vec4(0.86, 0.875, 0.895, a);
+    }`,
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+});
+const ROD_T = 0.55;
+let rodT = 0;
+const rods = [];
+for (const s of [-1, 1]) for (const zf of [-1, 1]) {
+  const m = new THREE.Mesh(rodGeo, rodMat);
+  m.position.set(s * 0.95, 0.02, zf * 1.15);
+  m.rotation.y = s * zf * -0.3;               // splay front and rear rods into a shallow V
+  m.userData = { s };
+  m.visible = false; m.renderOrder = 3;
+  car.tilt.add(m); rods.push(m);
+}
+function updateRods(dt) {
+  if (rodT > 0) rodT = Math.max(0, rodT - dt);
+  const on = rodT > 0;
+  const k = on ? Math.min(1, (ROD_T - rodT) / 0.05) * Math.min(1, rodT / 0.14) : 0;
+  rodMat.uniforms.uA.value = k;
+  rodMat.uniforms.uT.value += dt;
+  const len = (0.35 + 0.65 * Math.min(1, (ROD_T - rodT) / 0.06)) * (0.94 + 0.06 * Math.sin(rodMat.uniforms.uT.value * 70));
+  for (const m of rods) { m.visible = on && m.userData.s === flipSide; m.scale.set(m.userData.s * len, 1, 1); }
 }
 
 // ---------- obstacles ----------
@@ -698,7 +740,7 @@ const $ = id => document.getElementById(id);
 const elDist = $('dist'), elSpd = $('spd'), elBest = $('best'), elThr = $('thr');
 let best = 0;
 try { best = Number(localStorage.getItem('roadster-best')) || 0; } catch (e) {}
-const fmt = n => Math.floor(n).toLocaleString('ko-KR') + ' m';
+const fmt = n => Math.floor(n).toLocaleString('en-US') + ' m';
 elBest.textContent = fmt(best);
 
 // ---------- camera poses (portrait screens get their own framing) ----------
@@ -727,7 +769,7 @@ car.root.rotation.y = IDLE_YAW;
 function resetRun() {
   obstacles.splice(0).forEach(removeObstacle);
   speed = START_SPEED; worldSpeed = speed; dist = 0; sinceSpawn = 0; gap = 60; lastKind = '';
-  y = 0; vy = 0; airborne = false; flipLeft = 0; flipT = 0; spinV = 0; jumpJetT = 0; flipJetT = 0; flipLiftT = 0; camY = 0;
+  y = 0; vy = 0; airborne = false; flipLeft = 0; flipT = 0; spinV = 0; jumpJetT = 0; rodT = 0; flipLiftT = 0; camY = 0;
   car.root.rotation.set(0, 0, 0); car.tilt.rotation.set(0, 0, 0);
   elThr.classList.remove('spent');
 }
@@ -758,7 +800,7 @@ function jump() {
   } else if (flipLeft > 0) {
     flipLeft = 0; flipLiftT = 0.15; flipTargetV = Math.min(Math.max(vy, 0) + 6.5, 12);
     flipT = FLIP; flipDir = Math.random() < 0.5 ? 1 : -1; flipSide = flipDir;
-    flipJetT = 0.45;
+    rodT = ROD_T;
     sfx.flip(); buzz(15); elThr.classList.add('spent');
   }
 }
@@ -775,9 +817,9 @@ function crash(o) {
   for (let i = 0; i < 30; i++) emit(rand(-1.2, 1.2), rand(0.3, 1.4), rand(-2.6, -1.8), rand(-3, 3), rand(0.5, 2.5), rand(-2, 1), rand(0.9, 1.6), 0.8, 2.2, 0.65, 1.2, rand(0.85, 0.95), 0.4, 0);
   const isBest = dist > best;
   if (isBest) { best = dist; try { localStorage.setItem('roadster-best', String(Math.floor(best))); } catch (e) {} }
-  const reasons = { tires: '충돌 · 타이어 더미', crash: '충돌 · 사고 차량', villain: '충돌 · 빌런 SUV', trailer: '충돌 · 트레일러' };
+  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · TRAILER' };
   setTimeout(() => {
-    $('overReason').textContent = reasons[o.kind] || '충돌';
+    $('overReason').textContent = reasons[o.kind] || 'CRASH';
     $('finalDist').textContent = fmt(dist);
     $('finalBest').textContent = fmt(best);
     $('newBest').hidden = !isBest;
@@ -885,7 +927,8 @@ function tick(now) {
   const upright = Math.cos(car.tilt.rotation.z) > 0.8;
   if (jumpJetT > 0) { jumpJetT -= dt; jumpJets(Math.ceil(dt * 300), y, dt); }
   else if (airborne && state === 'run' && upright && y > 0.15) jumpJets(Math.floor(dt * 120 + Math.random()), y, dt);
-  if (flipJetT > 0) { flipJetT -= dt; flipJets(Math.ceil(dt * 480), y, dt); }
+  updateRods(state === 'run' ? dt : 0);
+  if (state === 'over') rodT = 0;
 
   roadTex.offset.y = (roadTex.offset.y + dz / TILE) % 1;
 
