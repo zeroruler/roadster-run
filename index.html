@@ -143,7 +143,7 @@ kbd { font-family: var(--display); font-size: 9px; letter-spacing: 0.1em; paddin
 
 // ---------- constants ----------
 const G = 34, FLIP_V = 7, FLIP = 0.75;
-const LIFT_T = 0.26, LIFT_A = 98;          // steam thrust: duration and upward acceleration
+const LIFT_T = 0.16, LIFT_A = 140;          // steam thrust: duration and upward acceleration
 const START_SPEED = 22, MAX_SPEED = 58, ACCEL = 0.42;
 const SPAWN_Z = -150;
 const IDLE_YAW = -2.25, INTRO_T = 1.7;
@@ -899,7 +899,7 @@ function tick(now) {
     // kickflip lift ramps in over a few frames instead of snapping
     if (flipLiftT > 0) { flipLiftT -= dt; vy += (flipTargetV - vy) * Math.min(1, dt * 22); }
     // thrust builds in as the jets spool up, then tails off
-    if (liftT > 0) { const p = 1 - liftT / LIFT_T; vy += LIFT_A * smooth(0, 0.2, p) * (1 - 0.35 * p) * dt; liftT -= dt; }
+    if (liftT > 0) { const p = 1 - liftT / LIFT_T; vy += LIFT_A * smooth(0, 0.15, p) * (1 - 0.35 * p) * dt; liftT -= dt; }
     // on the way down the floor jets cushion the car, so it settles instead of dropping
     const cushion = state === 'run' && vy < 0 && Math.cos(car.tilt.rotation.z) > 0.8 ? 0.72 : 1;
     vy -= G * (flipT > 0 ? 0.55 : 1) * cushion * dt; y += vy * dt;
