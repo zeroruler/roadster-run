@@ -688,58 +688,8 @@ function removeObstacle(o) {
 }
 
 // ---------- audio ----------
-const sfx = (() => {
-  let ctx = null, osc1, osc2, engGain, engFilter, noiseBuf, master;
-  function init() {
-    if (ctx) return;
-    try {
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
-      master = ctx.createGain(); master.gain.value = 0.5; master.connect(ctx.destination);
-      noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 1.5, ctx.sampleRate);
-      const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-      osc1 = ctx.createOscillator(); osc1.type = 'sawtooth';
-      osc2 = ctx.createOscillator(); osc2.type = 'sine';
-      engFilter = ctx.createBiquadFilter(); engFilter.type = 'lowpass'; engFilter.frequency.value = 600;
-      engGain = ctx.createGain(); engGain.gain.value = 0;
-      osc1.connect(engFilter); osc2.connect(engFilter); engFilter.connect(engGain); engGain.connect(master);
-      osc1.start(); osc2.start();
-    } catch (e) { ctx = null; }
-  }
-  function noise(dur, f0, f1, vol, type) {
-    if (!ctx) return;
-    const src = ctx.createBufferSource(); src.buffer = noiseBuf;
-    const f = ctx.createBiquadFilter(); f.type = type; f.Q.value = 0.8;
-    const g = ctx.createGain(), t = ctx.currentTime;
-    f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + dur);
-    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    src.connect(f); f.connect(g); g.connect(master); src.start(t); src.stop(t + dur + 0.05);
-  }
-  function tone(freq, dur, vol, type, f1) {
-    if (!ctx) return;
-    const o = ctx.createOscillator(); o.type = type; const g = ctx.createGain(), t = ctx.currentTime;
-    o.frequency.setValueAtTime(freq, t); if (f1) o.frequency.exponentialRampToValueAtTime(f1, t + dur);
-    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    o.connect(g); g.connect(master); o.start(t); o.stop(t + dur + 0.05);
-  }
-  return {
-    init,
-    resume() { if (ctx && ctx.state === 'suspended') ctx.resume(); },
-    jump() { noise(0.5, 6000, 1500, 0.4, 'highpass'); },
-    flip() { noise(0.7, 7000, 1200, 0.45, 'bandpass'); },
-    land() { noise(0.15, 300, 80, 0.35, 'lowpass'); },
-    crash() { noise(0.9, 2500, 60, 0.85, 'lowpass'); tone(90, 0.5, 0.3, 'sine', 30); },
-    honk() { tone(392, 0.32, 0.05, 'square'); tone(494, 0.32, 0.04, 'square'); },
-    engine(speed, on) {
-      if (!ctx) return;
-      const t = ctx.currentTime;
-      engGain.gain.setTargetAtTime(on ? 0.03 : 0, t, 0.15);
-      osc1.frequency.setTargetAtTime(70 + speed * 4.2, t, 0.1);
-      osc2.frequency.setTargetAtTime(140 + speed * 9, t, 0.1);
-      engFilter.frequency.setTargetAtTime(400 + speed * 20, t, 0.2);
-    },
-    suspend() { if (ctx && ctx.state === 'running') ctx.suspend(); }
-  };
-})();
+// The game is silent; these hooks stay so the call sites read the same.
+const sfx = { init() {}, resume() {}, jump() {}, flip() {}, land() {}, crash() {}, honk() {}, engine() {}, suspend() {} };
 
 // ---------- HUD ----------
 const $ = id => document.getElementById(id);
