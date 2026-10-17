@@ -83,6 +83,23 @@ kbd { font-family: var(--display); font-size: 9px; letter-spacing: 0.1em; paddin
   font-size: 11px; color: var(--mute); pointer-events: none;
 }
 .only-touch { display: none; }
+/* phones: one step up across the type scale */
+@media (max-width: 600px) {
+  .label { font-size: 11px; }
+  .big { font-size: 30px; }
+  .mid { font-size: 15px; }
+  .chip { font-size: 11px; }
+  .chip i { width: 22px; }
+  .eyebrow { font-size: 11px; }
+  h1 { font-size: 36px; }
+  .panel p { font-size: 15px; }
+  .keys { font-size: 14px; }
+  kbd { font-size: 11px; }
+  .btn { font-size: 13px; padding: 16px 34px; min-height: 52px; }
+  .stats .big { font-size: 32px; }
+  .newbest { font-size: 12px; }
+  .hint { font-size: 13px; }
+}
 @media (hover: none) and (pointer: coarse) {
   .only-key { display: none; }
   .only-touch { display: inline; }
@@ -787,7 +804,7 @@ const camPos = new THREE.Vector3(), camLook = new THREE.Vector3();
 let state = 'idle', introT = 0;
 let speed = 0, worldSpeed = 0, dist = 0, sinceSpawn = 0, gap = 50, lastKind = '';
 let y = 0, vy = 0, airborne = false, flipLeft = 0, flipT = 0, flipDir = 1;
-let shake = 0, fovKick = 0, spinV = 0, overShownAt = 0, liftT = 0, flipLiftT = 0, flipTargetV = 0, camY = 0;
+let shake = 0, fovKick = 0, spinV = 0, overShownAt = 0, overTimer = 0, liftT = 0, flipLiftT = 0, flipTargetV = 0, camY = 0;
 car.root.rotation.y = IDLE_YAW;
 
 function resetRun() {
@@ -809,10 +826,12 @@ function press() {
   sfx.init(); sfx.resume();
   if (state === 'idle') { state = 'intro'; introT = 0; $('startOv').hidden = true; return; }
   if (state === 'intro') return;
-  if (state === 'over') { if (performance.now() - overShownAt > 450) startRun(); return; }
+  // after a crash, input counts only once the crash card is up (and a beat has passed)
+  if (state === 'over') { if (overShownAt && performance.now() - overShownAt > 450) startRun(); return; }
   jump();
 }
 function startRun() {
+  clearTimeout(overTimer); overShownAt = 0;
   resetRun(); state = 'run';
   $('overOv').hidden = true; $('hud').hidden = false; $('hint').hidden = false;
 }
@@ -842,7 +861,9 @@ function crash(o) {
   const isBest = dist > best;
   if (isBest) { best = dist; try { localStorage.setItem('roadster-best', String(Math.floor(best))); } catch (e) {} }
   const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · TRAILER' };
-  setTimeout(() => {
+  overShownAt = 0;
+  clearTimeout(overTimer);
+  overTimer = setTimeout(() => {
     $('overReason').textContent = reasons[o.kind] || 'CRASH';
     $('finalDist').textContent = fmt(dist);
     $('finalBest').textContent = fmt(best);
@@ -869,7 +890,11 @@ document.addEventListener('gesturestart', e => e.preventDefault());
   e.preventDefault(); press();
 }));
 $('startBtn').addEventListener('click', e => { e.stopPropagation(); press(); });
-$('retryBtn').addEventListener('click', e => { e.stopPropagation(); overShownAt = 0; press(); });
+$('retryBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  // the button only restarts from the crash card; a Space keyup landing here after a restart must not jump
+  if (state === 'over' && overShownAt) startRun();
+});
 function onResize() {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
