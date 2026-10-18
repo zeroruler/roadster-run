@@ -607,7 +607,7 @@ const puffTex = (() => {
   g.putImageData(img, 0, 0);
   const t = new THREE.CanvasTexture(c); t.flipY = false; return t;
 })();
-const MAXP = SMALL ? 1100 : 2000;
+const MAXP = SMALL ? 1800 : 3600;
 const pPos = new Float32Array(MAXP * 3), pSize = new Float32Array(MAXP), pAlpha = new Float32Array(MAXP), pRot = new Float32Array(MAXP), pTint = new Float32Array(MAXP), pSoft = new Float32Array(MAXP);
 const pVel = new Float32Array(MAXP * 3), pLife = new Float32Array(MAXP), pMax = new Float32Array(MAXP), pS0 = new Float32Array(MAXP),
   pGrow = new Float32Array(MAXP), pA0 = new Float32Array(MAXP), pDrag = new Float32Array(MAXP), pRotV = new Float32Array(MAXP), pBuoy = new Float32Array(MAXP), pGnd = new Uint8Array(MAXP);
@@ -650,14 +650,14 @@ const steam = new THREE.Points(pGeo, pMat);
 steam.frustumCulled = false;
 steam.renderOrder = 2;
 scene.add(steam);
-let pHead = 0, nextSoft = 0, nextCarry = 0, nextFade = 0.7;
-const pCarry = new Float32Array(MAXP), pFade = new Float32Array(MAXP);
+let pHead = 0, nextSoft = 0, nextCarry = 0, nextFade = 0.7, nextFadeIn = 45;
+const pCarry = new Float32Array(MAXP), pFade = new Float32Array(MAXP), pFadeIn = new Float32Array(MAXP);
 function emit(x, y, z, vx, vy, vz, life, size, grow, alpha, drag = 0, tint = 1, buoy = 0, gnd = 1) {
   const i = pHead; pHead = (pHead + 1) % MAXP;
   pPos[i * 3] = x; pPos[i * 3 + 1] = y; pPos[i * 3 + 2] = z;
   pVel[i * 3] = vx; pVel[i * 3 + 1] = vy; pVel[i * 3 + 2] = vz;
   pLife[i] = pMax[i] = life; pS0[i] = size; pGrow[i] = grow; pA0[i] = alpha; pDrag[i] = drag;
-  pTint[i] = tint; pSoft[i] = nextSoft; pCarry[i] = nextCarry; pFade[i] = nextFade; pRot[i] = Math.random() * 6.283; pRotV[i] = rand(-1.2, 1.2); pBuoy[i] = buoy; pGnd[i] = gnd;
+  pTint[i] = tint; pSoft[i] = nextSoft; pCarry[i] = nextCarry; pFade[i] = nextFade; pFadeIn[i] = nextFadeIn; pRot[i] = Math.random() * 6.283; pRotV[i] = rand(-1.2, 1.2); pBuoy[i] = buoy; pGnd[i] = gnd;
 }
 function updateParticles(dt, dz) {
   for (let i = 0; i < MAXP; i++) {
@@ -670,16 +670,16 @@ function updateParticles(dt, dz) {
     pPos[j] += pVel[j] * dt; pPos[j + 1] += pVel[j + 1] * dt; pPos[j + 2] += pVel[j + 2] * dt + dz * (1 - pCarry[i]);
     // hitting the floor: the jet splashes outward and rolls along the ground
     if (pGnd[i] && pPos[j + 1] < 0.18 && pVel[j + 1] < 0) {
-      const sp = -pVel[j + 1] * 0.32, ang = Math.random() * 6.283;
+      const sp = Math.min(-pVel[j + 1] * 0.32, 4), ang = Math.random() * 6.283;
       pPos[j + 1] = 0.18; pVel[j + 1] = rand(0.2, 0.7); pSoft[i] = 0.5;
       // only some of the jet lingers as a ground cloud; the rest just fades where it lands
-      if (Math.random() < 0.4) { pGrow[i] = rand(1.7, 2.4); pA0[i] *= 0.7; pLife[i] += 0.4; pMax[i] += 0.4; }
-      else { pGrow[i] = rand(1.0, 1.4); pA0[i] *= 0.5; }
+      if (Math.random() < 0.3) { pGrow[i] = rand(1.8, 2.4); pA0[i] *= 0.6; pLife[i] += 0.3; pMax[i] += 0.3; pBuoy[i] = rand(0.3, 0.8); }
+      else { pGrow[i] = rand(1.0, 1.4); pA0[i] *= 0.4; }
       pVel[j] += Math.cos(ang) * sp; pVel[j + 2] += Math.sin(ang) * sp * 0.8;
     }
     const age = pMax[i] - pLife[i], f = pLife[i] / pMax[i];
     pSize[i] = pS0[i] + pGrow[i] * Math.sqrt(age);
-    pAlpha[i] = pA0[i] * Math.min(1, age * 45) * Math.pow(f, pFade[i]);
+    pAlpha[i] = pA0[i] * Math.min(1, age * pFadeIn[i]) * Math.pow(f, pFade[i]);
     pRot[i] += pRotV[i] * dt;
   }
   for (const n of ['position', 'aSize', 'aAlpha', 'aRot', 'aTint', 'aSoft']) pGeo.attributes[n].needsUpdate = true;
@@ -691,33 +691,45 @@ function updatePointScale() {
   pMat.uniforms.uMaxPx.value = tmpV2.y * 0.2;
 }
 
-// Jets follow the demo footage: thin straight plumes that move with the car instead of trailing behind it.
-let jumpJetT = 0, flipJetT = 0, flipSide = 1;
+// Jets follow the demo footage: thick rocket-like columns that flare wider as they fall and pile into a cloud on the floor.
+let jumpJetT = 0, flipSide = 1;
 const WHEEL_POS = [[-WHEEL_X, WHEEL_Z[0]], [WHEEL_X, WHEEL_Z[0]], [-WHEEL_X, WHEEL_Z[1]], [WHEEL_X, WHEEL_Z[1]]];
 // spread each puff along the stretch it would have covered this frame, so a fast jet reads as one unbroken streak
-function jetPuff(x, y, z, dx, dy, dz, sp, dt, spread, size, grow, life, drag = 0.9, fade = 0.7) {
+function jetPuff(x, y, z, dx, dy, dz, sp, dt, spread, size, grow, life, drag = 0.9, fade = 0.7, alpha = rand(0.85, 1.0), carry = 0.9, fadeIn = 45) {
   const vx = dx * sp + rand(-spread, spread), vy = dy * sp + rand(-spread, spread), vz = dz * sp + rand(-spread, spread);
   const f = Math.random() * dt;
-  nextSoft = 1; nextCarry = 0.9; nextFade = fade;   // carried along with the car
-  emit(x + vx * f, y + vy * f, z + vz * f, vx, vy, vz, life, size, grow, rand(0.85, 1.0), drag, rand(0.96, 1.0), 0, 1);
-  nextSoft = 0; nextCarry = 0; nextFade = 0.7;
+  nextSoft = 1; nextCarry = carry; nextFade = fade; nextFadeIn = fadeIn;   // carried along with the car
+  emit(x + vx * f, y + vy * f, z + vz * f, vx, vy, vz, life, size, grow, alpha, drag, rand(0.96, 1.0), 0, 1);
+  nextSoft = 0; nextCarry = 0; nextFade = 0.7; nextFadeIn = 45;
 }
-// jump: four thin columns straight down from the wheels; they bloom into cloud only at the floor
-function jumpJets(n, y, dt) {
+// jump: four columns straight down from the wheels; they bloom into cloud only at the floor.
+// The launch burst is a high-pressure blast: faster, fatter and denser than the hold that follows.
+function jumpJets(n, y, dt, burst = false) {
   for (const [wx, wz] of WHEEL_POS) for (let i = 0; i < n; i++) {
-    jetPuff(wx + Math.sign(wx) * 0.06, y + 0.1, wz + rand(-0.04, 0.04), Math.sign(wx) * 0.06, -1, 0, rand(20, 26), dt, 0.28,
-      rand(0.22, 0.3), rand(0.65, 0.9), rand(0.45, 0.7));
+    // slower exit than before so puffs overlap into one solid column; strong growth flares it out toward the floor
+    if (burst) jetPuff(wx + Math.sign(wx) * 0.06, y + 0.1, wz + rand(-0.04, 0.04), Math.sign(wx) * 0.04, -1, 0, rand(24, 30), dt, 0.18,
+      rand(0.42, 0.52), rand(1.7, 2.1), rand(0.75, 1.05), 0.6, 0.5, 1);
+    else jetPuff(wx + Math.sign(wx) * 0.06, y + 0.1, wz + rand(-0.04, 0.04), Math.sign(wx) * 0.04, -1, 0, rand(22, 28), dt, 0.18,
+      rand(0.36, 0.44), rand(1.4, 1.7), rand(0.6, 0.85), 0.6, 0.55, 1);
   }
 }
-// kickflip: two horizontal plumes from one flank, front and rear, splayed into a V.
-// They hold their direction while the body rolls, so the spray never gets flung around.
-function flipJets(n, y, dt) {
-  const s = flipSide;
-  for (const [pz, dzz] of [[-1.15, -0.32], [1.15, 0.32]]) for (let i = 0; i < n; i++) {
-    // same puff size as the vertical jets; faster exit and harder braking read as a stronger blast
-    jetPuff(s * 1.0, y + 0.7, pz, s, 0.04, dzz, rand(32, 38), dt, 0.3,
-      rand(0.22, 0.3), rand(0.65, 0.9), rand(0.3, 0.4), 8.5, 2.0);
+// kickflip: two plumes from one flank, front and rear, splayed into a slight V. The nozzles are part of the body,
+// so they turn with the roll; the exit is fast enough that each short plume stays a nearly straight rod as it sweeps.
+// The body turns ~15 degrees a frame at full spin, so each puff takes the angle the nozzle had at its own instant
+// within the frame and has already flown for the rest of it; that fills the fan in without gaps between frames.
+let flipRoll = 0;
+function flipJets(n, y, dt, roll) {
+  const s = flipSide, r0 = flipRoll;
+  for (const [pz, dzz] of [[-1.15, -0.2], [1.15, 0.2]]) for (let i = 0; i < n; i++) {
+    const t = Math.random(), a = lerp(r0, roll, t), c = Math.cos(a), sn = Math.sin(a);
+    const sp = rand(44, 50), vx = s * c * sp + rand(-0.15, 0.15), vy = s * sn * sp + rand(-0.15, 0.15), vz = dzz * sp + rand(-0.15, 0.15);
+    const f = (1 - t) * dt;
+    nextSoft = 1; nextCarry = 0.9; nextFade = 1.6; nextFadeIn = 600;   // older puffs dim fast, so no swept arc lingers
+    emit(s * 0.88 * c + vx * f, y + 0.7 + s * 0.88 * sn + vy * f, pz + vz * f, vx, vy, vz,
+      rand(0.13, 0.15), rand(0.34, 0.42), rand(1.0, 1.3), 1, 11.0, rand(0.96, 1.0), 0, 1);
+    nextSoft = 0; nextCarry = 0; nextFade = 0.7; nextFadeIn = 45;
   }
+  flipRoll = roll;
 }
 
 // ---------- obstacles ----------
@@ -1034,7 +1046,7 @@ car.root.rotation.y = IDLE_YAW;
 function resetRun() {
   obstacles.splice(0).forEach(removeObstacle);
   speed = START_SPEED; worldSpeed = speed; dist = 0; sinceSpawn = 0; gap = 60; lastKind = '';
-  y = 0; vy = 0; airborne = false; flipLeft = 0; flipT = 0; spinV = 0; pitchV = 0; braking = false; crashDecay = 4; jumpJetT = 0; flipJetT = 0; liftT = 0; flipLiftT = 0; camY = 0;
+  y = 0; vy = 0; airborne = false; flipLeft = 0; flipT = 0; spinV = 0; pitchV = 0; braking = false; crashDecay = 4; jumpJetT = 0; liftT = 0; flipLiftT = 0; camY = 0;
   car.root.rotation.set(0, 0, 0); car.tilt.rotation.set(0, 0, 0);
   elThr.classList.remove('spent');
 }
@@ -1070,12 +1082,11 @@ function startRun() {
 function jump() {
   if (!airborne) {
     vy = 0.4; liftT = LIFT_T; airborne = true; flipLeft = 1;
-    jumpJetT = 0.3;
+    jumpJetT = 0.4;
     sfx.jump(); buzz(10);
   } else if (flipLeft > 0) {
     flipLeft = 0; flipLiftT = 0.15; flipTargetV = Math.min(Math.max(vy, 0) + 4, 6.5);
-    flipT = FLIP; flipDir = Math.random() < 0.5 ? 1 : -1; flipSide = flipDir;
-    flipJetT = 0.45;
+    flipT = FLIP; flipDir = Math.random() < 0.5 ? 1 : -1; flipSide = flipDir; flipRoll = car.tilt.rotation.z;
     sfx.flip(); buzz(15); elThr.classList.add('spent');
   }
 }
@@ -1249,9 +1260,10 @@ function tick(now) {
   // steam jets keep firing briefly after the press
   // launch burst, then a steady hold for as long as the car is airborne with its wheels facing the floor
   const upright = Math.cos(car.tilt.rotation.z) > 0.8;
-  if (jumpJetT > 0) { jumpJetT -= dt; jumpJets(Math.ceil(dt * 300), y, dt); }
-  else if (airborne && state === 'run' && upright && y > 0.15) jumpJets(Math.floor(dt * 120 + Math.random()), y, dt);
-  if (flipJetT > 0) { flipJetT -= dt; flipJets(Math.ceil(dt * 650), y, dt); }
+  if (jumpJetT > 0) { jumpJetT -= dt; jumpJets(Math.ceil(dt * 620), y, dt, true); }
+  else if (airborne && state === 'run' && upright && y > 0.15) jumpJets(Math.floor(dt * 280 + Math.random()), y, dt);
+  // kickflip jets fire for the whole roll, until the body is level again
+  if (flipT > 0 && state === 'run') flipJets(Math.ceil(dt * 1400), y, dt, car.tilt.rotation.z);
 
   roadTex.offset.y = (roadTex.offset.y + dz / TILE) % 1;
 
