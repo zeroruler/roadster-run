@@ -16,10 +16,15 @@
   --body: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
   color-scheme: light;
 }
+/* inside a tunnel the page goes dark with the road */
+body.tunnel { --paper: #000000; --ink: #eef0f3; --mute: #8b9099; --line: #3a3e45; }
+body.tunnel .panel p { color: #b4b9c1; }
+body.tunnel .btn:hover { background: #d4d7dc; }
+body.tunnel #overOv { background: linear-gradient(to top, rgba(0,0,0,0.9) 40%, rgba(0,0,0,0)); padding-top: 60px; }   /* the card stays readable over a lit sign */
 [hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
-  background: var(--paper); color: var(--ink);
+  background: var(--paper); color: var(--ink); transition: color 0.4s, background 0.4s;
   font-family: var(--body); overflow: hidden; overscroll-behavior: none;
   word-break: keep-all; overflow-wrap: break-word; line-break: strict;
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
@@ -27,6 +32,7 @@ body {
 }
 #stage { position: fixed; inset: 0; touch-action: none; }
 #stage canvas { display: block; width: 100%; height: 100%; }
+#glare { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; }   /* the eye catching up at a tunnel exit */
 
 .top {
   position: fixed; left: 0; right: 0; top: 0;
@@ -108,6 +114,7 @@ kbd { font-family: var(--display); font-size: 9px; letter-spacing: 0.1em; paddin
 </style>
 
 <div id="stage"></div>
+<div id="glare"></div>
 
 <div class="top" id="hud" hidden>
   <div class="gauge">
@@ -165,6 +172,9 @@ const START_SPEED = 22, MAX_SPEED = 58, ACCEL = 0.42;
 const SPAWN_Z = -150;
 const IDLE_YAW = -2.25, INTRO_T = 1.7;
 const SMALL = Math.min(innerWidth, innerHeight) < 700;
+// tunnels: the first is always at 10 km (500 m when run locally, for testing), then rarely; each is 1 km long
+const LOCAL = location.protocol === 'file:' || /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+const TUNNEL_FIRST = LOCAL ? 500 : 10000, TUNNEL_LEN = 1000;
 
 // ---------- renderer / scene ----------
 const stage = document.getElementById('stage');
@@ -181,10 +191,68 @@ stage.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xffffff);
 scene.fog = new THREE.Fog(0xffffff, 40, 140);
+// Fog that knows about the tunnel: anything inside the tunnel's span and cross-section fades to black,
+// everything else to the studio white. Looking into the mouth from outside, the inside recedes into dark;
+// looking out from inside, the world past the exit stays bright, with a soft gradient at each portal.
+const TU = {
+  tunCamWorld: { value: null },                              // the camera's own matrixWorld, set below
+  tunSpan: { value: new THREE.Vector4(-1e6, -1e6, 0, 0) },   // exit z, entrance z, half width, height
+  tunDark: { value: new THREE.Color(0x000000) },
+};
+THREE.ShaderChunk.fog_pars_vertex += '\n#ifdef USE_FOG\n\tuniform mat4 tunCamWorld;\n\tvarying vec3 vTunWorld;\n#endif';
+THREE.ShaderChunk.fog_vertex += '\n#ifdef USE_FOG\n\tvTunWorld = ( tunCamWorld * mvPosition ).xyz;\n#endif';
+const TUN_RAMP = 32;                     // metres over which daylight fades out past each portal
+THREE.ShaderChunk.fog_pars_fragment += `
+#ifdef USE_FOG
+	#define TUN_RAMP ${TUN_RAMP.toFixed(1)}
+	uniform vec4 tunSpan;
+	uniform vec3 tunDark;
+	varying vec3 vTunWorld;
+	// daylight reaching into the tunnel: 1 at and beyond each portal, gone TUN_RAMP metres in
+	float tunDay() {
+		float z = vTunWorld.z;
+		// light falls away fast just inside the mouth, then lingers faintly: no long half-lit grey stretch
+		float d = max( smoothstep( tunSpan.y - TUN_RAMP, tunSpan.y + 1.0, z ), 1.0 - smoothstep( tunSpan.x - 1.0, tunSpan.x + TUN_RAMP, z ) );
+		return pow( d, 1.8 );
+	}
+	// is the eye inside the tunnel?
+	float tunEye() {
+		return step( abs( cameraPosition.x ), tunSpan.z ) * step( cameraPosition.y, tunSpan.w ) * step( tunSpan.x, cameraPosition.z ) * step( cameraPosition.z, tunSpan.y );
+	}
+	// the share of the sight line from eye to surface that runs through the dark of the tunnel
+	float tunInside() {
+		float a = min( cameraPosition.z, vTunWorld.z ), b = max( cameraPosition.z, vTunWorld.z );
+		float lo = tunSpan.x + TUN_RAMP * 0.4, hi = tunSpan.y - TUN_RAMP * 0.4;
+		float frag = step( abs( vTunWorld.x ), tunSpan.z ) * step( vTunWorld.y, tunSpan.w );
+		return max( 0.0, min( b, hi ) - max( a, lo ) ) / max( b - a, 0.001 ) * max( frag, tunEye() );
+	}
+#endif`;
+// Two hazes in a row along the sight line, the one nearer the eye laid on last: looking in from outside, the dark
+// inside is veiled by the white outside, so a far portal fades into the white like anything else; looking out
+// from inside, the bright world beyond is veiled by the dark, so a far exit stays hidden and grows out of the black.
+THREE.ShaderChunk.fog_fragment = `
+#ifdef USE_FOG
+	float tIn = tunInside();
+	float fIn = smoothstep( fogNear, fogFar, fogDepth * tIn ), fOut = smoothstep( fogNear, fogFar, fogDepth * ( 1.0 - tIn ) );
+	if ( tunEye() > 0.5 ) gl_FragColor.rgb = mix( mix( gl_FragColor.rgb, fogColor, fOut ), tunDark, fIn );
+	else gl_FragColor.rgb = mix( mix( gl_FragColor.rgb, tunDark, fIn ), fogColor, fOut );
+#endif`;
+THREE.Material.prototype.onBeforeCompile = shader => { Object.assign(shader.uniforms, TU); };
+// a tunnel surface that takes on daylight near the portals: `day` is GLSL for its colour in full daylight
+function daylit(mat, day) {
+  mat.onBeforeCompile = shader => {
+    Object.assign(shader.uniforms, TU);
+    shader.fragmentShader = shader.fragmentShader.replace('#include <fog_fragment>',
+      `gl_FragColor.rgb = mix( gl_FragColor.rgb, ${day}, tunDay() );\n#include <fog_fragment>`);
+  };
+  return mat;
+}
 
 const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.1, 500);
+TU.tunCamWorld.value = camera.matrixWorld;
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x8d939c, 0.3));
+const hemi = new THREE.HemisphereLight(0xffffff, 0x8d939c, 0.3);
+scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xffffff, 0.75);
 sun.position.set(3, 16, 4);
 sun.target.position.set(0, 0, -6);
@@ -267,6 +335,237 @@ scene.add(road);
 const catcher = new THREE.Mesh(new THREE.PlaneGeometry(80, 200), new THREE.ShadowMaterial({ opacity: 0.16 }));
 catcher.rotation.x = -Math.PI / 2; catcher.position.set(0, 0.004, -60); catcher.receiveShadow = true;
 scene.add(catcher);
+
+// ---------- tunnel ----------
+// Scenery placed by road position: something at road metre P sits at z = odo - P.
+// Outside it is one more white form on the studio floor: a smooth arch shell with a dark mouth.
+// Inside, floor, sky and page fade to charcoal; the walls close in to just past the road edge,
+// and a row of soft lamps on each wall sweeps past.
+// The crown stays above the high camera (about 11 m when jumping), so the tunnel is narrow rather than low.
+const TUN_A = 6.2, TUN_B = 11.6, TUN_N = 2.6, TUN_SHELL = 1.4, LAMP_STEP = 16, LAMP_Y = 4.4;
+// the arch: a superellipse from the right foot over the crown to the left foot
+const ARCH = [];
+for (let i = 0; i <= 56; i++) {
+  const t = i / 56 * Math.PI, c = Math.cos(t), sn = Math.sin(t), e = 2 / TUN_N;
+  ARCH.push([Math.sign(c) * Math.pow(Math.abs(c), e), Math.pow(sn, e)]);
+}
+ARCH[0] = [1, 0]; ARCH[56] = [-1, 0];
+const archY = x => TUN_B * Math.pow(Math.max(0, 1 - Math.pow(Math.abs(x) / TUN_A, TUN_N)), 1 / TUN_N);
+// sweep the arch (scaled by inset) between two z stations; inward faces the inside of the tube
+function archBand(inset, z0, z1, inward, shade) {
+  const pos = [], col = [], idx = [], A = TUN_A + inset, B = TUN_B + inset;
+  for (const z of [z0, z1]) for (const [u, v] of ARCH) {
+    pos.push(u * A, v * B, z);
+    if (shade) { const k = shade(v); col.push(k[0], k[1], k[2]); }
+  }
+  const n = ARCH.length;
+  for (let i = 0; i < n - 1; i++) {
+    const a = i, b = i + 1, c = i + n, d = i + 1 + n;
+    if (inward) idx.push(a, c, b, b, c, d); else idx.push(a, b, c, b, d, c);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  if (shade) g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx); g.computeVertexNormals();
+  return g;
+}
+// the tunnel floor: true black, with the road's two grey lane lines and nothing else; the lines are solid, so it can simply stretch.
+// Near a portal it turns back into the studio road: white, its lines a faint grey.
+const tunFloorMat = daylit(new THREE.MeshBasicMaterial({ map: canvasTex(512, 8, (g, w, h) => {
+  g.fillStyle = '#000000'; g.fillRect(0, 0, w, h);
+  const X = x => (x / (2 * TUN_A) + 0.5) * w;
+  g.fillStyle = '#6a6e75';
+  [X(-3.3), X(3.3)].forEach(x => g.fillRect(x - 4, 0, 8, h));
+}) }), 'mix( vec3( 1.0 ), vec3( 0.906, 0.914, 0.925 ), gl_FragColor.r / 0.416 )');
+
+const tunnelGroup = new THREE.Group();
+scene.add(tunnelGroup);
+// the tube is unit-long along z and stretched each frame over the part of the tunnel in view
+const tube = new THREE.Group();
+// inside: black like the floor, only the lamps' wash shows the walls; near a portal daylight
+// greys them up to the tone of the cutting outside, a touch darker toward the crown
+const inner = new THREE.Mesh(archBand(0, -0.5, 0.5, true, v => [v, v, v]),
+  daylit(new THREE.MeshBasicMaterial({ color: 0x000000 }), 'mix( vec3( 0.863, 0.875, 0.89 ), vec3( 0.8, 0.81, 0.826 ), vTunWall )'));
+inner.material.onBeforeCompile = (prev => shader => {
+  // the crown height comes in through the vertex colours' red channel
+  shader.vertexShader = shader.vertexShader.replace('#include <common>', '#include <common>\nattribute vec3 color;\nvarying float vTunWall;')
+    .replace('#include <fog_vertex>', '#include <fog_vertex>\nvTunWall = color.r;');
+  shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vTunWall;');
+  prev(shader);
+})(inner.material.onBeforeCompile);
+const shellMat = std(0xe2e6ec, { roughness: 0.5 });   // a faint cool tint, like the truck, so the white form separates from the floor
+const outer = new THREE.Mesh(archBand(TUN_SHELL, -0.5, 0.5, false), shellMat);
+outer.receiveShadow = true;
+// past the drawn stretch the tube is capped with black, so the studio white never shows down its length
+const tubeCap = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(ARCH.map(([u, v]) => new THREE.Vector2(u * TUN_A, v * TUN_B))), 1),
+  new THREE.MeshBasicMaterial({ color: 0x000000 }));
+tubeCap.visible = false; tunnelGroup.add(tubeCap);
+const tunFloor = new THREE.Mesh(new THREE.PlaneGeometry(2 * TUN_A, 1).rotateX(-Math.PI / 2), tunFloorMat);
+tunFloor.position.y = 0.002;
+tube.add(inner, outer, tunFloor); tube.visible = false; tunnelGroup.add(tube);
+// wall lamps every LAMP_STEP metres: a slim cool-white bar, and a soft wash of its light on the wall around it
+const MAXL = 2 * (Math.ceil(380 / LAMP_STEP) + 2);
+const lampX = TUN_A * Math.pow(1 - Math.pow(LAMP_Y / TUN_B, TUN_N), 1 / TUN_N);   // where the wall is at lamp height
+const lamps = new THREE.InstancedMesh(new THREE.BoxGeometry(0.1, 0.16, 1.9), new THREE.MeshBasicMaterial({ color: 0xf2f6fb }), MAXL);
+const washes = new THREE.InstancedMesh(new THREE.PlaneGeometry(5.2, 2.6).rotateY(Math.PI / 2),
+  new THREE.MeshBasicMaterial({ map: softTex, color: 0xa9c4e6, transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }), MAXL);
+for (const m of [lamps, washes]) { m.frustumCulled = false; m.count = 0; tunnelGroup.add(m); }
+// each portal: the shell's lip, and the mouth filled with what lies beyond it
+const lipGeo = (() => {
+  const pos = [], idx = [], n = ARCH.length;
+  for (const [u, v] of ARCH) pos.push(u * TUN_A, v * TUN_B, 0, u * (TUN_A + TUN_SHELL), v * (TUN_B + TUN_SHELL), 0);
+  for (let i = 0; i < n - 1; i++) { const p = 2 * i, q = p + 1, p2 = p + 2, q2 = p + 3; idx.push(p, q, q2, p, q2, p2); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx); g.computeVertexNormals();
+  return g;
+})();
+// matte, no studio reflections: the lip is a material, not a glow
+const lipMat = std(0xf1f2f4, { roughness: 0.9, envMapIntensity: 0.4, side: THREE.DoubleSide });
+function makePortal() {
+  const g = new THREE.Group();
+  const lip = new THREE.Mesh(lipGeo, lipMat); lip.receiveShadow = true;
+  g.add(lip); g.visible = false; tunnelGroup.add(g);
+  return g;
+}
+const portalIn = makePortal(), portalOut = makePortal();
+
+// The way in: the road runs through a cutting into a smooth white hill, and the portal is set in its face.
+// Wings slope down toward the car on either side of the cutting; behind the face the hill runs on over the tunnel.
+const HILL_H = 19, HILL_R = 75, HILL_F = 34, HILL_BACK = 220, CUT = TUN_A + TUN_SHELL, BATTER = 0.35;
+// the cutting's sides lean back as they rise, so they catch the light like the rest of the hill
+const cutX = h => CUT + BATTER * h;
+const hillAcross = x => 0.5 + 0.5 * Math.cos(Math.PI * Math.min(1, Math.abs(x) / HILL_R));
+const hillAlong = z => z <= 0 ? 1 : 0.5 + 0.5 * Math.cos(Math.PI * Math.min(1, z / HILL_F));
+const hillY = (x, z) => HILL_H * hillAcross(x) * hillAlong(z);
+// sweep cross-section profiles (same point count) through z stations
+function loftProfiles(zs, profile) {
+  const pos = [], idx = [];
+  let m = 0;
+  for (const z of zs) { const pr = profile(z); m = pr.length; for (const [x, y] of pr) pos.push(x, y, z); }
+  for (let j = 0; j < zs.length - 1; j++) for (let i = 0; i < m - 1; i++) {
+    const a = j * m + i, b = a + 1, c = a + m, d = c + 1;
+    idx.push(a, b, c, b, d, c);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx); g.computeVertexNormals();
+  return g;
+}
+const hillMat = std(0xeeeff1, { roughness: 0.95, envMapIntensity: 0.5, side: THREE.DoubleSide });
+// the cutting's sides and the face are the same flat pale grey the tunnel walls reach at the mouth,
+// on both sides alike, so wall runs on into wall instead of one side dropping into shade
+const cutMat = new THREE.MeshBasicMaterial({ color: 0xdcdfe3, side: THREE.DoubleSide });
+const hill = new THREE.Group();
+{
+  const ts = []; for (let i = 0; i <= 28; i++) ts.push(Math.pow(i / 28, 1.4));
+  const xs = ts.map(t => CUT + (HILL_R - CUT) * t);
+  const wingZ = []; for (let i = 0; i <= 20; i++) wingZ.push(HILL_F * i / 20);
+  const backZ = []; for (let i = 0; i <= 12; i++) backZ.push(-HILL_BACK * Math.pow(i / 12, 1.5));
+  for (const s of [-1, 1]) {
+    // a wing: the slope beside the cutting, and the cutting's sheer side
+    hill.add(new THREE.Mesh(loftProfiles(wingZ, z => {
+      const x0 = cutX(hillY(CUT, z));
+      return ts.map(t => { const x = x0 + (HILL_R - x0) * t; return [s * x, hillY(x, z)]; });
+    }), hillMat));
+    hill.add(new THREE.Mesh(loftProfiles(wingZ, z => [[s * CUT, 0], [s * cutX(hillY(CUT, z)), hillY(CUT, z)]]), cutMat));
+  }
+  // the hill over the tunnel, closed across the top
+  const over = []; for (let i = -28; i <= 28; i++) over.push(Math.sign(i) * (i === 0 ? 0 : xs[Math.abs(i)]));
+  hill.add(new THREE.Mesh(loftProfiles(backZ, z => over.map(x => [x, hillY(x, z)])), hillMat));
+  // the face above the portal: from the hill's brow down to the arch
+  const top = cutX(hillY(CUT, 0));
+  const face = [new THREE.Vector2(CUT, 0), new THREE.Vector2(top, hillY(top, 0))];
+  for (let i = 1; i < 20; i++) { const x = top - 2 * top * i / 20; face.push(new THREE.Vector2(x, hillY(x, 0))); }
+  face.push(new THREE.Vector2(-top, hillY(top, 0)));
+  for (let i = ARCH.length - 1; i >= 1; i--) face.push(new THREE.Vector2(ARCH[i][0] * CUT, ARCH[i][1] * (TUN_B + TUN_SHELL)));
+  const headwall = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(face), 1), cutMat);
+  headwall.position.z = 0.01;
+  hill.add(headwall);
+  hill.traverse(m => { if (m.isMesh) m.receiveShadow = true; });
+  hill.visible = false; tunnelGroup.add(hill);
+}
+// the way out is the same hill turned round, so the walls run on outside and the road leaves through a cutting
+const hillOut = hill.clone();
+hillOut.scale.z = -1; hillOut.visible = false; tunnelGroup.add(hillOut);
+
+// The way out: light from outside spills in over the last stretch, the mouth blooms, and stepping out
+// over-exposes for a moment before the eye settles.
+const exitHalo = new THREE.Mesh(new THREE.PlaneGeometry(TUN_A * 5, TUN_B * 2.6),
+  new THREE.MeshBasicMaterial({ map: softTex, color: 0xffffff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
+exitHalo.position.y = TUN_B * 0.45; exitHalo.renderOrder = 2;
+portalOut.add(exitHalo);
+// the sky itself takes no fog, so seen down the tunnel it would glare from any distance; a white backdrop
+// past the exit stands in for it and is fogged like the rest, dim from deep inside and bright close up
+const EXIT_SKY = 130;
+const exitSky = new THREE.Mesh(new THREE.PlaneGeometry(600, 300), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+exitSky.position.y = 100; exitSky.visible = false; tunnelGroup.add(exitSky);
+const glare = document.getElementById('glare');
+function flashGlare() {
+  glare.style.transition = 'none'; glare.style.opacity = '0.3';
+  requestAnimationFrame(() => requestAnimationFrame(() => { glare.style.transition = 'opacity 0.9s ease-out'; glare.style.opacity = '0'; }));
+}
+
+let odo = 0, tunA = TUNNEL_FIRST, darkK = -1, glowK = -1, lastZOut = -Infinity;
+const inTunnelAt = P => P >= tunA && P <= tunA + TUNNEL_LEN;
+// nothing spawns right at a portal, while the light is changing,
+// and the road stays clear for a while past the exit, while the eye gets used to the light again
+const nearPortal = P => (P > tunA - 30 && P < tunA + 50) || (P > tunA + TUNNEL_LEN - 30 && P < tunA + TUNNEL_LEN + 160);
+const C_BLACK = new THREE.Color(0x000000), C_SPILL = new THREE.Color(0x8d939b);
+function applyTheme(k, glow) {
+  if (Math.abs(k - darkK) < 0.002 && Math.abs(glow - glowK) < 0.002) return;
+  darkK = k; glowK = glow;
+  // near the exit the haze takes on the daylight ahead, so the far end of the tunnel brightens
+  TU.tunDark.value.lerpColors(C_BLACK, C_SPILL, glow * 0.45);
+  scene.fog.near = lerp(40, 25, k); scene.fog.far = lerp(140, 125, k);
+  hemi.intensity = lerp(0.3, 0.2, k) + 0.12 * glow * k; sun.intensity = lerp(0.75, 0.5, k);
+  catcher.material.opacity = lerp(0.16, 0.4, k);
+  document.body.classList.toggle('tunnel', k > 0.5);
+}
+const lampM = new THREE.Matrix4();
+function updateTunnel() {
+  const d = odo - tunA;
+  // once a tunnel is well behind, book the next one a few kilometres on
+  if (d > TUNNEL_LEN + 400) { tunA += TUNNEL_LEN + rand(4000, 7000); lastZOut = -Infinity; }
+  const zIn = odo - tunA, zOut = zIn - TUNNEL_LEN;
+  const glow = smooth(-100, -5, zOut) * (zOut < 20 ? 1 : 0);
+  // the car's light and the page follow the same daylight ramp as the tunnel surfaces
+  applyTheme(1 - Math.pow(Math.max(1 - smooth(-1, TUN_RAMP, zIn), smooth(-TUN_RAMP, 1, zOut)), 1.8), glow);
+  if (state === 'run' && lastZOut < -2 && zOut >= -2) flashGlare();
+  lastZOut = zOut;
+  const near = Math.min(zIn, 40), far = Math.max(zOut, -340), on = near > far;
+  TU.tunSpan.value.set(zOut, zIn, TUN_A + TUN_SHELL + 0.05, TUN_B + TUN_SHELL + 0.05);
+  tube.visible = on;
+  if (on) { tube.position.z = (near + far) / 2; tube.scale.z = near - far; }
+  tubeCap.visible = on && far > zOut + 1;
+  if (tubeCap.visible) tubeCap.position.z = far;
+  let n = 0;
+  if (on) {
+    const k0 = Math.ceil((odo - near - tunA) / LAMP_STEP), k1 = Math.floor((odo - far - tunA) / LAMP_STEP);
+    for (let k = Math.max(k0, 1); k <= k1 && n < MAXL; k++) {
+      const z = odo - (tunA + k * LAMP_STEP);
+      for (const s of [-1, 1]) {
+        lampM.makeTranslation(s * (lampX - 0.06), LAMP_Y, z); lamps.setMatrixAt(n, lampM);
+        lampM.makeTranslation(s * (lampX - 0.03), LAMP_Y, z); washes.setMatrixAt(n++, lampM);
+      }
+    }
+    lamps.instanceMatrix.needsUpdate = true; washes.instanceMatrix.needsUpdate = true;
+  }
+  lamps.count = washes.count = n;
+  portalIn.visible = zIn > -200 && zIn < 12;
+  if (portalIn.visible) {
+    portalIn.position.z = zIn;
+  }
+  // the hill is only ever seen from outside
+  hill.visible = zIn > -260 && zIn < 45 && darkK < 0.9;
+  if (hill.visible) hill.position.z = zIn;
+  hillOut.visible = zOut > -260 && zOut < 60;
+  if (hillOut.visible) hillOut.position.z = zOut;
+  exitSky.visible = zOut > -340 && zOut < 5;
+  if (exitSky.visible) exitSky.position.z = zOut - EXIT_SKY;
+  portalOut.visible = zOut > -200 && zOut < 2;
+  if (portalOut.visible) { portalOut.position.z = zOut; exitHalo.material.opacity = 0.06 * glow * glow; }   // the barest bloom, only once it is near
+}
 
 // ---------- car (lofted body) ----------
 // Catmull-Rom through [u, value] knots, so the loft has no creases
@@ -543,6 +842,10 @@ function useFlatbed(gltf) {
   g.computeVertexNormals();
   flatbedProto = { geo: shared(g), mat: flatbedMat, bedTop, bedFrom, bedTo };
 }
+// tunnel barricade: a black-and-yellow steel frame, long side across the lane
+let barricadeProto = null;
+const BARR_H = 1.65;                     // chest high: a solid wall of steel, still under a plain jump
+function useBarricade(gltf) { barricadeProto = makeProto(gltf, 'barricade', 0, { yaw: 0, height: BARR_H }); }
 function useTruck(gltf) {
   truckProto = makeProto(gltf, 'truck', 0, { yaw: 0, height: TRUCK_H });
   if (truckProto) truckProto.mat.color.setHex(0xd9dee6);   // a faint cool tint so the white box separates from the floor
@@ -572,7 +875,8 @@ function loadGlb() {
   loadModel('car.js', 'CAR_GLB_B64', useCar, () => loadModel('suv.js', 'SUV_GLB_B64', useSuv,
     () => loadModel('truck.js', 'TRUCK_GLB_B64', useTruck,
       () => loadModel('coil.js', 'COIL_GLB_B64', useCoil,
-        () => loadModel('flatbed.js', 'FLATBED_GLB_B64', useFlatbed)))));
+        () => loadModel('flatbed.js', 'FLATBED_GLB_B64', useFlatbed,
+          () => loadModel('barricade.js', 'BARRICADE_GLB_B64', useBarricade))))));
 }
 
 const car = buildCar(paints.pearl);
@@ -759,10 +1063,33 @@ const trailerTex = canvasTex(512, 128, (g, w, h) => {
 });
 const trailerMat = shared(new THREE.MeshStandardMaterial({ map: trailerTex, roughness: 0.5 }));
 
+// tunnel ceiling signs: hung low enough that the car fits under them, so any jump hits one
+const SIGN_LOW = 2.05, SIGN_STEP = 7, SIGN_W = 9, SIGN_HB = 1.1;
+const CAR_TOP = 1.45;
+const SIGN_LEAD = () => 10 + speed * 0.3;                   // the player's roof, for overhead hits
+const signBoardMat = shared(new THREE.MeshBasicMaterial({ map: canvasTex(1024, 128, (g, w, h) => {
+  g.fillStyle = '#f2b705'; g.fillRect(0, 0, w, h);
+  g.fillStyle = '#16171a';
+  for (let x = -h; x < w + h; x += 64) {
+    for (const [y0, y1] of [[0, 14], [h - 14, h]]) {
+      g.beginPath(); g.moveTo(x, y1); g.lineTo(x + 32, y1); g.lineTo(x + 32 + (y1 - y0), y0); g.lineTo(x + (y1 - y0), y0); g.closePath(); g.fill();
+    }
+  }
+  g.font = 'bold 58px Helvetica, Arial, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText('\u25BC  LOW CLEARANCE  \u25BC', w / 2, h / 2 + 2);
+}) }));
+const signBoardGeo = shared(new THREE.PlaneGeometry(SIGN_W, SIGN_HB));
+const signFrameGeo = shared(new THREE.BoxGeometry(SIGN_W + 0.1, SIGN_HB + 0.1, 0.12));
+const signRodGeo = shared(new THREE.CylinderGeometry(0.03, 0.03, 1, 6));
+const signFrameMat = shared(std(0x2a2c30, { roughness: 0.5, metalness: 0.4 }));
+// thick tunnel smoke: big billboards that loop, owned by the wreck so the jets never recycle them
+const smokeMat = shared(new THREE.SpriteMaterial({ map: puffTex, color: 0x9ba1aa, transparent: true, depthWrite: false }));
+
 const obstacles = [];
 function spawnObstacle(kind, z) {
   const root = new THREE.Group();
-  const o = { kind, root, z, x: 0, hw: 6, hd: 1, h: 1.5, t: 0, blinkers: [], smoke: null, update: null };
+  const o = { kind, root, z, x: 0, hw: 6, hd: 1, h: 1.5, low: 0, t: 0, blinkers: [], smoke: null, update: null };
+  const inTunnel = inTunnelAt(odo - z);
   if (kind === 'tires') {
     // an oval pile, tallest in the middle, two or three staggered rows deep
     let spots = [];
@@ -843,6 +1170,27 @@ function spawnObstacle(kind, z) {
     root.add(cone(-side * 3.2, -4.2), cone(-side * 3.9, -5.2), triangle(0, -7));
     o.h = (c1.h || 1.43) + 0.02; o.hd = 1.0;
     o.smoke = [new THREE.Vector3(-side * 2.0, 0.9, 0), new THREE.Vector3(side * 2.4, 0.9, -1.4)];
+    if (inTunnel) {
+      // in the tunnel the smoke has nowhere to go: a grey curtain hangs over the wreck and hides what is behind it
+      const puffs = [];
+      const N = SMALL ? 22 : 30;
+      for (let i = 0; i < N; i++) {
+        const m = smokeMat.clone(); m.userData.shared = false; m.rotation = Math.random() * 6.283;
+        const sp = new THREE.Sprite(m); shared(sp.geometry);   // three's one sprite quad, never disposed
+        const p = { sp, x0: rand(-4.8, 4.8), z0: rand(-7, 0.5), ph: i / N, life: rand(3.2, 4.4), drift: rand(-0.4, 0.4) };
+        root.add(sp); puffs.push(p);
+      }
+      o.update = () => {
+        for (const p of puffs) {
+          const a = (o.t / p.life + p.ph) % 1;
+          p.sp.position.set(p.x0 + p.drift * a * 4, 1.0 + a * 4.5, p.z0 - a * 1.5);
+          const sz = 3.6 + a * 6; p.sp.scale.set(sz, sz, 1);
+          p.sp.material.opacity = 0.95 * Math.min(1, a * 4) * Math.pow(1 - a, 0.7);
+          p.sp.material.rotation += 0.004;
+        }
+      };
+      o.update();
+    }
   } else if (kind === 'villain') {
     const s = buildCar(paints.black, { suv: true });
     if (!s.isSuv) s.root.scale.set(1.08, 1.2, 1.05);   // stand-in until the SUV scan has loaded
@@ -994,6 +1342,62 @@ function spawnObstacle(kind, z) {
     }));
     for (let i = -2; i <= 2; i++) root.add(cone(i * 1.9, -3));
     o.h = 2.62; o.hd = 1.32;
+  } else if (kind === 'barricade') {
+    // two steel barricades side by side across the lane, ends overlapping, a little askew
+    const bw = barricadeProto.sizeX, bd = barricadeProto.sizeZ;
+    const spots = [[-bw * 0.45, rand(-0.15, 0.15)], [bw * 0.45, rand(-0.15, 0.15)]];
+    const pieces = [];
+    for (const [x, z] of spots) {
+      const m = new THREE.Mesh(barricadeProto.geo, barricadeProto.mat);
+      m.castShadow = true; m.receiveShadow = true;
+      m.position.set(x + rand(-0.15, 0.15), 0, z + rand(-0.1, 0.1)); m.rotation.y = rand(-0.18, 0.18) + (Math.random() < 0.5 ? Math.PI : 0);
+      root.add(m); pieces.push({ m, v: new THREE.Vector3(), w: new THREE.Vector3() });
+    }
+    const xMax = Math.max(...spots.map(s => Math.abs(s[0]))), zMax = Math.max(...spots.map(s => Math.abs(s[1])));
+    o.hw = xMax + bw / 2; o.h = BARR_H + 0.02; o.hd = zMax + bd / 2 + 0.1;
+    // hit, they give way like the tire pile: flung forward and out, tumbling
+    o.scatter = carSpeed => {
+      for (const p of pieces) {
+        const side = Math.sign(p.m.position.x) || (Math.random() < 0.5 ? -1 : 1);
+        p.v.set(side * rand(2, 5), rand(3, 6), -carSpeed * rand(0.4, 0.65));
+        p.w.set(rand(-6, 6), rand(-3, 3), rand(-6, 6));
+      }
+      o.update = dt => {
+        for (const p of pieces) {
+          p.v.y -= 22 * dt; p.m.position.addScaledVector(p.v, dt);
+          if (p.m.position.y < 0) { p.m.position.y = 0; p.v.y = Math.abs(p.v.y) * 0.3; p.v.x *= 0.7; p.v.z *= 0.7; p.w.multiplyScalar(0.6); }
+          p.m.rotation.x += p.w.x * dt; p.m.rotation.y += p.w.y * dt; p.m.rotation.z += p.w.z * dt;
+        }
+      };
+    };
+  } else if (kind === 'signs') {
+    // three boards hung on fine rods from the arch, one after another; the car fits under, a jump does not
+    const boards = [], top = archY(SIGN_W * 0.47) - 0.05;
+    for (const bz of [SIGN_STEP, 0, -SIGN_STEP]) {
+      const pivot = new THREE.Group(); pivot.position.set(0, top, bz);
+      const hang = new THREE.Group(); hang.position.y = SIGN_LOW + SIGN_HB / 2 - top;
+      const frame = new THREE.Mesh(signFrameGeo, signFrameMat); frame.castShadow = true;
+      const face = new THREE.Mesh(signBoardGeo, signBoardMat); face.position.z = 0.065;
+      hang.add(frame, face);
+      for (const s of [-1, 1]) {
+        const rod = new THREE.Mesh(signRodGeo, signFrameMat), len = top - SIGN_LOW - SIGN_HB / 2;
+        rod.scale.y = len; rod.position.set(s * SIGN_W * 0.47, len / 2, 0); hang.add(rod);
+      }
+      pivot.add(hang); root.add(pivot); boards.push({ pivot, z: bz, swing: 0 });
+    }
+    o.hw = SIGN_W / 2; o.low = SIGN_LOW; o.h = 0; o.hd = SIGN_STEP + 0.1;
+    // the board the roof struck swings forward on its rods and settles
+    o.strike = () => {
+      let b = boards[0];
+      for (const c of boards) if (Math.abs(o.z + c.z) < Math.abs(o.z + b.z)) b = c;
+      b.swing = 1;
+    };
+    o.update = dt => {
+      for (const b of boards) if (b.swing > 0) {
+        b.swing += dt;
+        b.pivot.rotation.x = 0.12 * Math.exp(-1.2 * (b.swing - 1)) * Math.sin((b.swing - 1) * 4.2 + 0.4);
+      }
+    };
   }
   root.position.set(o.x, 0, z);
   scene.add(root); obstacles.push(o);
@@ -1046,11 +1450,21 @@ car.root.rotation.y = IDLE_YAW;
 function resetRun() {
   obstacles.splice(0).forEach(removeObstacle);
   speed = START_SPEED; worldSpeed = speed; dist = 0; sinceSpawn = 0; gap = 60; lastKind = '';
+  odo = 0; tunA = TUNNEL_FIRST; lastZOut = -Infinity;
   y = 0; vy = 0; airborne = false; flipLeft = 0; flipT = 0; spinV = 0; pitchV = 0; braking = false; crashDecay = 4; jumpJetT = 0; liftT = 0; flipLiftT = 0; camY = 0;
   car.root.rotation.set(0, 0, 0); car.tilt.rotation.set(0, 0, 0);
   elThr.classList.remove('spent');
 }
-function chooseKind() {
+function chooseKind(inTunnel) {
+  if (inTunnel) {
+    // the tunnel has its own set: barricades, smoking wrecks and low signs (never two sign runs back to back)
+    const t = [['crash', 3]];
+    if (barricadeProto) t.push(['barricade', 3.5]);
+    if (lastKind !== 'signs') t.push(['signs', 2]);
+    let r = Math.random() * t.reduce((s, [, v]) => s + v, 0);
+    for (const [k, v] of t) if ((r -= v) <= 0) return k;
+    return 'crash';
+  }
   const w = [['tires', 3], ['crash', 3]];
   if (dist > 140) w.push(['villain', 2.4]);
   // the truck turns up more as the run speeds up: ~13% of picks at 135 km/h, capped near 35% from ~234 km/h,
@@ -1094,11 +1508,16 @@ function crash(o) {
   state = 'over'; shake = 0.5; sfx.crash(); buzz([40, 30, 60]);
   liftT = 0; flipLiftT = 0; pitchV = 0; braking = false;
   const contactZ = -(o.hd + CAR_L / 2 + 0.05);
-  if (o.kind === 'tires' && o.scatter) {
+  if ((o.kind === 'tires' || o.kind === 'barricade') && o.scatter) {
     // tires give way: the pile bursts and the car brakes to a stop through the gap
     o.scatter(speed);
     worldSpeed = speed * 0.85; crashDecay = 2.6; braking = true;
     vy = Math.min(vy, 0); airborne = y > 0.02; spinV = 0; shake = 0.25;
+  } else if (o.kind === 'signs') {
+    // the roof clips a board: the car is slapped back down and skids on under the signs
+    o.strike();
+    worldSpeed = speed * 0.4; crashDecay = 2.2; braking = true;
+    vy = Math.min(vy, -3); airborne = y > 0.02; spinV = rand(-1.4, 1.4); shake = 0.55;
   } else {
     if (o.z > contactZ) { const push = contactZ - o.z; obstacles.forEach(ob => { ob.z += push; }); }
     if (o.kind === 'coil') {
@@ -1122,7 +1541,7 @@ function crash(o) {
   for (let i = 0; i < 30; i++) emit(rand(-1.2, 1.2), rand(0.3, 1.4), rand(-2.6, -1.8), rand(-3, 3), rand(0.5, 2.5), rand(-2, 1), rand(0.9, 1.6), 0.8, 2.2, 0.65, 1.2, rand(0.85, 0.95), 0.4, 0);
   const isBest = dist > best;
   if (isBest) { best = dist; try { localStorage.setItem('roadster-best', String(Math.floor(best))); } catch (e) {} }
-  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · CONTAINER TRUCK', crossing: 'CRASH · CONTAINER TRUCK', wrongway: 'CRASH · WRONG-WAY TRUCK', coil: 'CRASH · STEEL COIL' };
+  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · CONTAINER TRUCK', crossing: 'CRASH · CONTAINER TRUCK', wrongway: 'CRASH · WRONG-WAY TRUCK', coil: 'CRASH · STEEL COIL', barricade: 'CRASH · BARRICADE', signs: 'CRASH · LOW SIGN' };
   overShownAt = 0;
   clearTimeout(overTimer);
   overTimer = setTimeout(() => {
@@ -1203,21 +1622,28 @@ function tick(now) {
     car.root.rotation.y = IDLE_YAW + Math.sin(clock * 0.35) * 0.06;
   }
   const dz = worldSpeed * dt;
+  if (state === 'run' || state === 'over') odo += dz;
+  updateTunnel();
 
   // spawn
   if (state === 'run') {
     sinceSpawn += dz;
-    if (sinceSpawn >= gap) {
-      const kind = chooseKind();
+    const P = odo - SPAWN_Z;                              // the road metre a new obstacle would stand on
+    if (sinceSpawn >= gap && !nearPortal(P)) {
+      const kind = chooseKind(inTunnelAt(P));
       // the wrong-way truck starts further out so it still arrives when a parked obstacle would
       if (kind === 'wrongway') {
         // the sign shows up first; the truck starts far enough out to reach the car WRONGWAY_LAG road metres later
         spawnObstacle('nostraight', SPAWN_Z);
         spawnObstacle(kind, (SPAWN_Z - WRONGWAY_LAG) * (speed + WRONGWAY_V) / speed);
+      } else if (kind === 'signs') {
+        // set back so a jump over whatever came before has landed before the first board
+        spawnObstacle(kind, SPAWN_Z - SIGN_LEAD());
       } else spawnObstacle(kind, SPAWN_Z);
       lastKind = kind; sinceSpawn = 0;
       const minT = clamp(1.25 - dist / 6000, 0.95, 1.25);
-      gap = speed * rand(minT, minT + 0.9) + 16 + (kind === 'trailer' || kind === 'crossing' || kind === 'wrongway' ? 14 : 0) + (kind === 'coil' ? 26 : 0) + (kind === 'wrongway' ? WRONGWAY_LAG : 0);
+      gap = speed * rand(minT, minT + 0.9) + 16 + (kind === 'trailer' || kind === 'crossing' || kind === 'wrongway' ? 14 : 0) + (kind === 'coil' ? 26 : 0) + (kind === 'wrongway' ? WRONGWAY_LAG : 0)
+        + (kind === 'signs' ? SIGN_LEAD() + SIGN_STEP + speed * 0.4 : 0);   // and room to jump again after the last one
     }
   }
 
@@ -1281,7 +1707,9 @@ function tick(now) {
       const p = pick(o.smoke);
       emit(o.x + p.x + rand(-0.3, 0.3), p.y, o.z + p.z, rand(-0.3, 0.3), rand(1.2, 2.2), rand(-0.2, 0.2), rand(1.6, 2.6), 0.7, 1.4, 0.45, 0, 0.8, 0, 0);
     }
-    if (state === 'run' && Math.abs(o.z) < o.hd + 2.0 && Math.abs(o.x) < o.hw + 0.95 && y + 0.06 < o.h) crash(o);
+    // overhead things are hit by the roof, everything else by the floor of the car
+    const struck = o.low ? y + CAR_TOP > o.low : y + 0.06 < o.h;
+    if (state === 'run' && Math.abs(o.z) < o.hd + 2.0 && Math.abs(o.x) < o.hw + 0.95 && struck) crash(o);
     if (o.z > 22) { removeObstacle(o); obstacles.splice(i, 1); }
   }
 
