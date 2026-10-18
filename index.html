@@ -876,7 +876,8 @@ function loadGlb() {
     () => loadModel('truck.js', 'TRUCK_GLB_B64', useTruck,
       () => loadModel('coil.js', 'COIL_GLB_B64', useCoil,
         () => loadModel('flatbed.js', 'FLATBED_GLB_B64', useFlatbed,
-          () => loadModel('barricade.js', 'BARRICADE_GLB_B64', useBarricade))))));
+          () => loadModel('barricade.js', 'BARRICADE_GLB_B64', useBarricade,
+            () => loadModel('sign.js', 'SIGN_GLB_B64', useSign)))))));
 }
 
 const car = buildCar(paints.pearl);
@@ -1063,10 +1064,15 @@ const trailerTex = canvasTex(512, 128, (g, w, h) => {
 });
 const trailerMat = shared(new THREE.MeshStandardMaterial({ map: trailerTex, roughness: 0.5 }));
 
-// tunnel ceiling signs: hung low enough that the car fits under them, so any jump hits one
-const SIGN_LOW = 2.05, SIGN_STEP = 7, SIGN_W = 9, SIGN_HB = 1.1;
-const CAR_TOP = 1.45;
-const SIGN_LEAD = () => 10 + speed * 0.3;                   // the player's roof, for overhead hits
+// tunnel ceiling signs: hung low enough that the car fits under them, so any jump hits one.
+// Some runs are a trick: the boards come down as the car nears, front one first, and must be jumped instead.
+// boards span the lane; their height follows the lane-signal scan's proportions (1.90 x 0.40)
+const SIGN_LOW = 3.6, SIGN_STEP = 7, SIGN_W = 6.6, SIGN_HB = SIGN_W * 0.4 / 1.9;
+const SIGN_LEAN = 0.72;                 // a fallen board lands on its bottom edge and stays wedged, leaning well back
+const SIGN_FALL_T = 1.95;               // seconds ahead of the car when the first board lets go
+const SIGN_FALL_GAP = 0.5;              // and the second follows, far enough apart to hear: thud ... thud
+const CAR_TOP = 1.45;                   // the player's roof, for overhead hits
+const SIGN_LEAD = () => 10 + speed * 0.3;
 const signBoardMat = shared(new THREE.MeshBasicMaterial({ map: canvasTex(1024, 128, (g, w, h) => {
   g.fillStyle = '#f2b705'; g.fillRect(0, 0, w, h);
   g.fillStyle = '#16171a';
@@ -1081,7 +1087,36 @@ const signBoardMat = shared(new THREE.MeshBasicMaterial({ map: canvasTex(1024, 1
 const signBoardGeo = shared(new THREE.PlaneGeometry(SIGN_W, SIGN_HB));
 const signFrameGeo = shared(new THREE.BoxGeometry(SIGN_W + 0.1, SIGN_HB + 0.1, 0.12));
 const signRodGeo = shared(new THREE.CylinderGeometry(0.03, 0.03, 1, 6));
+// one board, centred on its middle, face toward the car (+z): the lane-signal scan once loaded, a drawn board till then
+let signProto = null;
+function useSign(gltf) {
+  let src = null;
+  gltf.scene.traverse(m => { if (m.isMesh && !src) src = m; });
+  if (!src) return;
+  const g = src.geometry.clone();
+  g.computeBoundingBox();
+  const bb = g.boundingBox, k = SIGN_W / (bb.max.x - bb.min.x);
+  g.translate(-(bb.min.x + bb.max.x) / 2, -(bb.min.y + bb.max.y) / 2, -(bb.min.z + bb.max.z) / 2);
+  g.scale(k, k, k);
+  const mat = src.material;
+  if (mat.map) {
+    mat.map.encoding = THREE.LinearEncoding;
+    // the arrows are LEDs: the face carries its own light, so they glow in the dark of the tunnel
+    mat.emissiveMap = mat.map; mat.emissive.setHex(0xffffff); mat.emissiveIntensity = 0.9;
+  }
+  mat.envMapIntensity = 0.4; mat.needsUpdate = true;
+  signProto = { geo: shared(g), mat: shared(mat) };
+}
+function buildSignBoard() {
+  const g = new THREE.Group();
+  if (signProto) { const m = new THREE.Mesh(signProto.geo, signProto.mat); m.castShadow = true; g.add(m); return g; }
+  const frame = new THREE.Mesh(signFrameGeo, signFrameMat); frame.castShadow = true;
+  const face = new THREE.Mesh(signBoardGeo, signBoardMat); face.position.z = 0.065;
+  g.add(frame, face);
+  return g;
+}
 const signFrameMat = shared(std(0x2a2c30, { roughness: 0.5, metalness: 0.4 }));
+const signRodMat = shared(new THREE.MeshBasicMaterial({ color: 0x8a8f97 }));   // pale enough to read: these boards hang
 // thick tunnel smoke: big billboards that loop, owned by the wreck so the jets never recycle them
 const smokeMat = shared(new THREE.SpriteMaterial({ map: puffTex, color: 0x9ba1aa, transparent: true, depthWrite: false }));
 
@@ -1371,31 +1406,91 @@ function spawnObstacle(kind, z) {
       };
     };
   } else if (kind === 'signs') {
-    // three boards hung on fine rods from the arch, one after another; the car fits under, a jump does not
-    const boards = [], top = archY(SIGN_W * 0.47) - 0.05;
-    for (const bz of [SIGN_STEP, 0, -SIGN_STEP]) {
+    // two boards hung on fine rods from the arch, one after the other; the car fits under, a jump does not.
+    // The first set a run meets always stays up, so the trick only works once the rule is known.
+    o.falls = signsSeen > 0 && Math.random() < 0.45; signsSeen++;
+    const boards = [], top = archY(SIGN_W * 0.47) - 0.05, len = top - SIGN_LOW - SIGN_HB / 2, hangY = SIGN_LOW + SIGN_HB / 2;
+    for (const bz of [SIGN_STEP / 2, -SIGN_STEP / 2]) {
       const pivot = new THREE.Group(); pivot.position.set(0, top, bz);
-      const hang = new THREE.Group(); hang.position.y = SIGN_LOW + SIGN_HB / 2 - top;
-      const frame = new THREE.Mesh(signFrameGeo, signFrameMat); frame.castShadow = true;
-      const face = new THREE.Mesh(signBoardGeo, signBoardMat); face.position.z = 0.065;
-      hang.add(frame, face);
-      for (const s of [-1, 1]) {
-        const rod = new THREE.Mesh(signRodGeo, signFrameMat), len = top - SIGN_LOW - SIGN_HB / 2;
-        rod.scale.y = len; rod.position.set(s * SIGN_W * 0.47, len / 2, 0); hang.add(rod);
-      }
-      pivot.add(hang); root.add(pivot); boards.push({ pivot, z: bz, swing: 0 });
+      const board = buildSignBoard(); board.position.y = hangY - top;
+      const rods = [-1, 1].map(s => {
+        const rod = new THREE.Mesh(signRodGeo, signRodMat);
+        rod.scale.y = len; rod.position.set(s * SIGN_W * 0.47, -len / 2, 0); pivot.add(rod); return rod;
+      });
+      pivot.add(board); root.add(pivot);
+      boards.push({ pivot, board, rods, z: bz, mode: 'hang', swing: 0, y: hangY, vy: 0, lean: 0 });
     }
-    o.hw = SIGN_W / 2; o.low = SIGN_LOW; o.h = 0; o.hd = SIGN_STEP + 0.1;
-    // the board the roof struck swings forward on its rods and settles
+    o.boards = boards; o.hw = SIGN_W / 2; o.h = 0; o.hd = SIGN_STEP / 2 + 0.6;
+    // collisions board by board: up, the roof hits it; coming down, anything under it; down, it is a wall to jump
+    o.collide = () => {
+      for (const b of boards) {
+        const bz = o.z + b.z;
+        if (b.mode === 'hang' && Math.abs(bz) < CAR_L / 2 + 0.1 && y + CAR_TOP > SIGN_LOW) return o.hitBy = b;
+        if (b.mode === 'fall' && Math.abs(bz) < CAR_L / 2 + 0.3 && y + CAR_TOP > b.y - SIGN_HB / 2 && y < b.y + SIGN_HB / 2) return o.hitBy = b;
+        if (b.mode === 'down' && Math.abs(bz) < CAR_L / 2 + 0.3 && y + 0.06 < SIGN_HB * Math.cos(SIGN_LEAN)) return o.hitBy = b;
+      }
+      return null;
+    };
     o.strike = () => {
-      let b = boards[0];
-      for (const c of boards) if (Math.abs(o.z + c.z) < Math.abs(o.z + b.z)) b = c;
-      b.swing = 1;
+      const b = o.hitBy;
+      if (!b) return;
+      o.reason = b.mode === 'hang' ? 'CRASH · LOW SIGN' : 'CRASH · FALLING SIGN';
+      if (b.mode === 'hang') b.swing = 1;                 // swings forward on its rods and settles
+      else { b.mode = 'knocked'; b.vy = 2; b.leanV = 4.5; }    // knocked over backward, flat ahead of the car
+    };
+    const drop = b => {
+      // the rods snap near the roof: the board jolts down a hand's width, hangs for a beat, then drops like a slab
+      b.mode = 'fall'; b.vy = 0; b.hold = 0.12; b.y -= 0.15;
+      b.pivot.remove(b.board); root.add(b.board); b.board.position.set(0, b.y, b.z);
+      for (const r of b.rods) { r.scale.y = 0.7; r.position.y = -0.35; }
     };
     o.update = dt => {
-      for (const b of boards) if (b.swing > 0) {
-        b.swing += dt;
-        b.pivot.rotation.x = 0.12 * Math.exp(-1.2 * (b.swing - 1)) * Math.sin((b.swing - 1) * 4.2 + 0.4);
+      if (o.falls) {
+        // the front board lets go SIGN_FALL_T seconds out, so it is down with time left to jump; the second just after
+        const lead = (-(o.z + boards[0].z)) / Math.max(speed, 10);
+        if (boards[0].mode === 'hang' && lead < SIGN_FALL_T && state === 'run') { drop(boards[0]); o.fallClock = 0; }
+        if (o.fallClock !== undefined) {
+          o.fallClock += dt;
+          if (boards[1].mode === 'hang' && o.fallClock > SIGN_FALL_GAP) drop(boards[1]);
+        }
+      }
+      for (const b of boards) {
+        for (const r of b.rods) r.visible = o.z + b.z < 3;   // they would pass right by the camera
+        if (b.mode === 'hang') {
+          if (b.swing > 0) { b.swing += dt; b.pivot.rotation.x = 0.12 * Math.exp(-1.2 * (b.swing - 1)) * Math.sin((b.swing - 1) * 4.2 + 0.4); }
+        } else if (b.mode === 'fall') {
+          if (b.hold > 0) b.hold -= dt;
+          else { b.vy -= 44 * dt; b.y += b.vy * dt; }
+          const rest = SIGN_HB / 2 * Math.cos(SIGN_LEAN);
+          if (b.y <= rest) {
+            // THUD: a heavy slab hitting the deck. It bounces a little, tips back onto its lean and wedges;
+            // the camera jolts, the phone buzzes, and dust bursts out along the bottom edge
+            b.y = rest; b.mode = 'down'; b.lean = SIGN_LEAN; b.bounce = Math.min(0.35, -b.vy * 0.04); b.bt = 0;
+            b.board.rotation.y = rand(-0.12, 0.12); b.board.rotation.z = rand(-0.05, 0.05);   // lands askew: plainly fallen
+            const bz = o.z + b.z;
+            if (state === 'run') { shake = Math.max(shake, 0.32 * clamp(1 + bz / 120, 0.3, 1)); buzz(30); }
+            for (let i = 0; i < 44; i++) {
+              const sx = rand(-1, 1);
+              emit(o.x + sx * SIGN_W / 2, 0.15, bz + rand(-0.3, 0.5), sx * rand(1.5, 4), rand(0.3, 1.4), rand(-0.6, 2.2), rand(0.7, 1.3), 0.55, 2.2, 0.5, 2.2, 0.7, 0, 0);
+            }
+          }
+        } else if (b.mode === 'down') {
+          if (b.bounce > 0) {
+            // one short hop and a settle
+            b.bt += dt;
+            const h = b.bounce * Math.max(0, Math.sin(b.bt * 14)) * Math.exp(-b.bt * 7);
+            b.y = SIGN_HB / 2 * Math.cos(SIGN_LEAN) + h;
+            b.lean = SIGN_LEAN + 0.14 * Math.exp(-b.bt * 6) * Math.cos(b.bt * 18);
+            if (b.bt > 0.8) { b.bounce = 0; b.lean = SIGN_LEAN; }
+          }
+        } else if (b.mode === 'knocked') {
+          b.vy -= 30 * dt; b.y = Math.max(0.08, b.y + b.vy * dt);
+          b.lean = Math.min(Math.PI / 2, b.lean + b.leanV * dt);
+          b.z -= speed * 0.25 * dt;
+        }
+        if (b.mode !== 'hang') {
+          b.board.position.set(0, b.y, b.z); b.board.rotation.x = -b.lean;
+        }
       }
     };
   }
@@ -1442,14 +1537,14 @@ const camPos = new THREE.Vector3(), camLook = new THREE.Vector3();
 
 // ---------- game state ----------
 let state = 'idle', introT = 0;
-let speed = 0, worldSpeed = 0, dist = 0, sinceSpawn = 0, gap = 50, lastKind = '';
+let speed = 0, worldSpeed = 0, dist = 0, sinceSpawn = 0, gap = 50, lastKind = '', signsSeen = 0;
 let y = 0, vy = 0, airborne = false, flipLeft = 0, flipT = 0, flipDir = 1;
 let shake = 0, fovKick = 0, spinV = 0, pitchV = 0, crashDecay = 4, braking = false, overShownAt = 0, overTimer = 0, liftT = 0, flipLiftT = 0, flipTargetV = 0, camY = 0;
 car.root.rotation.y = IDLE_YAW;
 
 function resetRun() {
   obstacles.splice(0).forEach(removeObstacle);
-  speed = START_SPEED; worldSpeed = speed; dist = 0; sinceSpawn = 0; gap = 60; lastKind = '';
+  speed = START_SPEED; worldSpeed = speed; dist = 0; sinceSpawn = 0; gap = 60; lastKind = ''; signsSeen = 0;
   odo = 0; tunA = TUNNEL_FIRST; lastZOut = -Infinity;
   y = 0; vy = 0; airborne = false; flipLeft = 0; flipT = 0; spinV = 0; pitchV = 0; braking = false; crashDecay = 4; jumpJetT = 0; liftT = 0; flipLiftT = 0; camY = 0;
   car.root.rotation.set(0, 0, 0); car.tilt.rotation.set(0, 0, 0);
@@ -1513,8 +1608,13 @@ function crash(o) {
     o.scatter(speed);
     worldSpeed = speed * 0.85; crashDecay = 2.6; braking = true;
     vy = Math.min(vy, 0); airborne = y > 0.02; spinV = 0; shake = 0.25;
+  } else if (o.kind === 'signs' && o.hitBy && o.hitBy.mode === 'down') {
+    // straight into a fallen board: the nose rides up over it and the car is tossed, sliding on
+    o.strike();
+    worldSpeed = speed * 0.3; crashDecay = 2.4; braking = true;
+    vy = 6; airborne = true; spinV = rand(-2.5, 2.5); pitchV = 2.2; shake = 0.55;
   } else if (o.kind === 'signs') {
-    // the roof clips a board: the car is slapped back down and skids on under the signs
+    // the roof clips a board, or one comes down on it: the car is slapped back down and skids on under the signs
     o.strike();
     worldSpeed = speed * 0.4; crashDecay = 2.2; braking = true;
     vy = Math.min(vy, -3); airborne = y > 0.02; spinV = rand(-1.4, 1.4); shake = 0.55;
@@ -1545,7 +1645,7 @@ function crash(o) {
   overShownAt = 0;
   clearTimeout(overTimer);
   overTimer = setTimeout(() => {
-    $('overReason').textContent = reasons[o.kind] || 'CRASH';
+    $('overReason').textContent = o.reason || reasons[o.kind] || 'CRASH';
     $('finalDist').textContent = fmt(dist);
     $('finalBest').textContent = fmt(best);
     $('newBest').hidden = !isBest;
@@ -1708,7 +1808,7 @@ function tick(now) {
       emit(o.x + p.x + rand(-0.3, 0.3), p.y, o.z + p.z, rand(-0.3, 0.3), rand(1.2, 2.2), rand(-0.2, 0.2), rand(1.6, 2.6), 0.7, 1.4, 0.45, 0, 0.8, 0, 0);
     }
     // overhead things are hit by the roof, everything else by the floor of the car
-    const struck = o.low ? y + CAR_TOP > o.low : y + 0.06 < o.h;
+    const struck = o.collide ? o.collide() : o.low ? y + CAR_TOP > o.low : y + 0.06 < o.h;
     if (state === 'run' && Math.abs(o.z) < o.hd + 2.0 && Math.abs(o.x) < o.hw + 0.95 && struck) crash(o);
     if (o.z > 22) { removeObstacle(o); obstacles.splice(i, 1); }
   }
