@@ -168,7 +168,7 @@ kbd { font-family: var(--display); font-size: 9px; letter-spacing: 0.1em; paddin
 // ---------- constants ----------
 const G = 34, FLIP_V = 7, FLIP = 0.75;
 const LIFT_T = 0.16, LIFT_A = 140;          // steam thrust: duration and upward acceleration
-const START_SPEED = 22, MAX_SPEED = 58, ACCEL = 0.42;
+const START_SPEED = 22, ACCEL = 0.42;          // no top speed: the run just keeps getting faster
 const SPAWN_Z = -150;
 const IDLE_YAW = -2.25, INTRO_T = 1.7;
 const SMALL = Math.min(innerWidth, innerHeight) < 700;
@@ -1117,14 +1117,13 @@ function buildSignBoard() {
 }
 const signFrameMat = shared(std(0x2a2c30, { roughness: 0.5, metalness: 0.4 }));
 const signRodMat = shared(new THREE.MeshBasicMaterial({ color: 0x8a8f97 }));   // pale enough to read: these boards hang
-// thick tunnel smoke: big billboards that loop, owned by the wreck so the jets never recycle them
+// thick smoke: big billboards that loop, owned by the obstacle so the jets never recycle them
 const smokeMat = shared(new THREE.SpriteMaterial({ map: puffTex, color: 0x9ba1aa, transparent: true, depthWrite: false }));
 
 const obstacles = [];
 function spawnObstacle(kind, z) {
   const root = new THREE.Group();
   const o = { kind, root, z, x: 0, hw: 6, hd: 1, h: 1.5, low: 0, t: 0, blinkers: [], smoke: null, update: null };
-  const inTunnel = inTunnelAt(odo - z);
   if (kind === 'tires') {
     // an oval pile, tallest in the middle, two or three staggered rows deep
     let spots = [];
@@ -1205,27 +1204,6 @@ function spawnObstacle(kind, z) {
     root.add(cone(-side * 3.2, -4.2), cone(-side * 3.9, -5.2), triangle(0, -7));
     o.h = (c1.h || 1.43) + 0.02; o.hd = 1.0;
     o.smoke = [new THREE.Vector3(-side * 2.0, 0.9, 0), new THREE.Vector3(side * 2.4, 0.9, -1.4)];
-    if (inTunnel) {
-      // in the tunnel the smoke has nowhere to go: a grey curtain hangs over the wreck and hides what is behind it
-      const puffs = [];
-      const N = SMALL ? 22 : 30;
-      for (let i = 0; i < N; i++) {
-        const m = smokeMat.clone(); m.userData.shared = false; m.rotation = Math.random() * 6.283;
-        const sp = new THREE.Sprite(m); shared(sp.geometry);   // three's one sprite quad, never disposed
-        const p = { sp, x0: rand(-4.8, 4.8), z0: rand(-7, 0.5), ph: i / N, life: rand(3.2, 4.4), drift: rand(-0.4, 0.4) };
-        root.add(sp); puffs.push(p);
-      }
-      o.update = () => {
-        for (const p of puffs) {
-          const a = (o.t / p.life + p.ph) % 1;
-          p.sp.position.set(p.x0 + p.drift * a * 4, 1.0 + a * 4.5, p.z0 - a * 1.5);
-          const sz = 3.6 + a * 6; p.sp.scale.set(sz, sz, 1);
-          p.sp.material.opacity = 0.95 * Math.min(1, a * 4) * Math.pow(1 - a, 0.7);
-          p.sp.material.rotation += 0.004;
-        }
-      };
-      o.update();
-    }
   } else if (kind === 'villain') {
     const s = buildCar(paints.black, { suv: true });
     if (!s.isSuv) s.root.scale.set(1.08, 1.2, 1.05);   // stand-in until the SUV scan has loaded
@@ -1358,6 +1336,40 @@ function spawnObstacle(kind, z) {
       const on = state === 'run' && Math.floor(o.t * 5) % 2 === 0;
       beams.forEach(b => { b.visible = on; });
     };
+  } else if (kind === 'stalled') {
+    // tunnel only: the container truck broken down in the lane, tail to the car, hazards on and the engine smoking.
+    // It is long, but by the tunnel the car is fast enough that a kickflip carries it over the whole length.
+    const t = new THREE.Mesh(truckProto.geo, truckProto.mat);
+    t.castShadow = true; t.receiveShadow = true;
+    t.rotation.y = -Math.PI / 2;                          // cab (at -x in the scan) away from the car
+    t.scale.z = WRONGWAY_WIDEN;
+    root.add(t);
+    const half = truckProto.sizeX / 2, halfW = truckProto.sizeZ / 2 * WRONGWAY_WIDEN;
+    for (const s of [-1, 1]) {
+      const b = box(0.3, 0.16, 0.06, amberMat, false); b.position.set(s * (halfW - 0.2), 1.0, half + 0.04); root.add(b); o.blinkers.push(b);
+    }
+    root.add(triangle(0, half + 6));
+    o.hw = halfW; o.h = truckProto.h + 0.02; o.hd = half + 0.1;
+    // the engine smokes from under the cab: a grey column that rolls up and spreads along the trailer roof
+    const cabZ = -half + 1.6, puffs = [];
+    const N = SMALL ? 22 : 30;
+    for (let i = 0; i < N; i++) {
+      const m = smokeMat.clone(); m.userData.shared = false; m.rotation = Math.random() * 6.283;
+      const sp = new THREE.Sprite(m); shared(sp.geometry);
+      puffs.push({ sp, x0: rand(-1.2, 1.2), ph: i / N, life: rand(2.6, 3.6), drift: rand(-0.6, 0.6), back: rand(3, 10) });
+      root.add(sp);
+    }
+    o.smoke = [new THREE.Vector3(-halfW * 0.6, 1.2, cabZ), new THREE.Vector3(halfW * 0.6, 1.2, cabZ), new THREE.Vector3(0, truckProto.h, cabZ)];
+    o.update = () => {
+      for (const p of puffs) {
+        const a = (o.t / p.life + p.ph) % 1;
+        p.sp.position.set(p.x0 + p.drift * a * 3, 1.2 + a * (truckProto.h + 2.5), cabZ + a * p.back);
+        const sz = 2.8 + a * 6.5; p.sp.scale.set(sz, sz, 1);
+        p.sp.material.opacity = 0.95 * Math.min(1, a * 5) * Math.pow(1 - a, 0.8);
+        p.sp.material.rotation += 0.005;
+      }
+    };
+    o.update();
   } else if (kind === 'nostraight') {
     // a lone "no straight ahead" sign on the right shoulder; the wrong-way truck comes up behind it.
     // Scenery only, never hit (h stays 0).
@@ -1552,13 +1564,14 @@ function resetRun() {
 }
 function chooseKind(inTunnel) {
   if (inTunnel) {
-    // the tunnel has its own set: barricades, smoking wrecks and low signs (never two sign runs back to back)
-    const t = [['crash', 3]];
+    // the tunnel has its own set: barricades, a broken-down truck and low signs (never two sign runs or trucks back to back)
+    const t = [];
     if (barricadeProto) t.push(['barricade', 3.5]);
+    if (truckProto && lastKind !== 'stalled') t.push(['stalled', 2.5]);
     if (lastKind !== 'signs') t.push(['signs', 2]);
     let r = Math.random() * t.reduce((s, [, v]) => s + v, 0);
     for (const [k, v] of t) if ((r -= v) <= 0) return k;
-    return 'crash';
+    return t.length ? t[t.length - 1][0] : 'tires';
   }
   const w = [['tires', 3], ['crash', 3]];
   if (dist > 140) w.push(['villain', 2.4]);
@@ -1628,7 +1641,7 @@ function crash(o) {
       worldSpeed = -Math.min(9, speed * 0.25); crashDecay = 4;   // recoil: the world moves away for a moment
       vy = 7; airborne = true; spinV = rand(-5, 5) || 3;
       // what was hit gives a little too: a truck barely shifts, a car is shoved a bit further and twists
-      const heavy = o.kind === 'trailer' || o.kind === 'crossing' || o.kind === 'wrongway';
+      const heavy = o.kind === 'trailer' || o.kind === 'crossing' || o.kind === 'wrongway' || o.kind === 'stalled';
       o.kv = -Math.min(heavy ? 3 : 6, speed * (heavy ? 0.07 : 0.14));
       o.yawV = (Math.random() < 0.5 ? -1 : 1) * (heavy ? rand(0.06, 0.12) : rand(0.3, 0.6));
       o.hit = true;                                       // a crossing truck brakes to a stop
@@ -1641,7 +1654,7 @@ function crash(o) {
   for (let i = 0; i < 30; i++) emit(rand(-1.2, 1.2), rand(0.3, 1.4), rand(-2.6, -1.8), rand(-3, 3), rand(0.5, 2.5), rand(-2, 1), rand(0.9, 1.6), 0.8, 2.2, 0.65, 1.2, rand(0.85, 0.95), 0.4, 0);
   const isBest = dist > best;
   if (isBest) { best = dist; try { localStorage.setItem('roadster-best', String(Math.floor(best))); } catch (e) {} }
-  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · CONTAINER TRUCK', crossing: 'CRASH · CONTAINER TRUCK', wrongway: 'CRASH · WRONG-WAY TRUCK', coil: 'CRASH · STEEL COIL', barricade: 'CRASH · BARRICADE', signs: 'CRASH · LOW SIGN' };
+  const reasons = { tires: 'CRASH · TIRE STACK', crash: 'CRASH · WRECKED CARS', villain: 'CRASH · VILLAIN SUV', trailer: 'CRASH · CONTAINER TRUCK', crossing: 'CRASH · CONTAINER TRUCK', wrongway: 'CRASH · WRONG-WAY TRUCK', coil: 'CRASH · STEEL COIL', barricade: 'CRASH · BARRICADE', signs: 'CRASH · LOW SIGN', stalled: 'CRASH · BROKEN-DOWN TRUCK' };
   overShownAt = 0;
   clearTimeout(overTimer);
   overTimer = setTimeout(() => {
@@ -1713,7 +1726,7 @@ function tick(now) {
     worldSpeed = START_SPEED * smooth(0.45, 1, p);
     if (p >= 1) { startRun(); worldSpeed = START_SPEED; }
   } else if (state === 'run') {
-    speed = Math.min(MAX_SPEED, speed + ACCEL * dt);
+    speed += ACCEL * dt;
     worldSpeed = speed; dist += speed * dt;
   } else if (state === 'over') {
     worldSpeed *= Math.exp(-crashDecay * dt);
@@ -1742,7 +1755,7 @@ function tick(now) {
       } else spawnObstacle(kind, SPAWN_Z);
       lastKind = kind; sinceSpawn = 0;
       const minT = clamp(1.25 - dist / 6000, 0.95, 1.25);
-      gap = speed * rand(minT, minT + 0.9) + 16 + (kind === 'trailer' || kind === 'crossing' || kind === 'wrongway' ? 14 : 0) + (kind === 'coil' ? 26 : 0) + (kind === 'wrongway' ? WRONGWAY_LAG : 0)
+      gap = speed * rand(minT, minT + 0.9) + 16 + (kind === 'trailer' || kind === 'crossing' || kind === 'wrongway' ? 14 : 0) + (kind === 'stalled' ? 2 * truckProto.sizeX : 0) + (kind === 'coil' ? 26 : 0) + (kind === 'wrongway' ? WRONGWAY_LAG : 0)
         + (kind === 'signs' ? SIGN_LEAD() + SIGN_STEP + speed * 0.4 : 0);   // and room to jump again after the last one
     }
   }
@@ -1820,7 +1833,7 @@ function tick(now) {
   camLook.lerpVectors(POSE.idle.look, POSE.game.look, camT);
   const sp = state === 'run' || state === 'over' ? worldSpeed : START_SPEED;
   fovKick *= Math.exp(-3 * dt);
-  camera.fov = fitFov(lerp(POSE.idle.fov, POSE.game.fov + (sp - START_SPEED) * 0.2, camT) + fovKick);
+  camera.fov = fitFov(lerp(POSE.idle.fov, POSE.game.fov + Math.min(sp - START_SPEED, 60) * 0.2, camT) + fovKick);
   camera.updateProjectionMatrix();
   updatePointScale();
   shake *= Math.exp(-4 * dt);
